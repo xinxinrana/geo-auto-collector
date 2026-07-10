@@ -1,0 +1,260 @@
+// service-worker.js — 任务调度中心。串行执行、tab 管理、注入 adapter、状态机、保活。
+// M1：跑通 Perplexity 单/多关键词的 输入→提交→判完成→提取。截图与导出为 M2/M3。
+
+import { PLATFORMS } from './platforms.js';
+import {
+  saveResult, saveScreenshot,
+  getActiveSessionId, setActiveSessionId, getAllSessions, createSession,
+} from '../storage/db.js';
+import { captureFullPage } from '../lib/screenshot.js';
+
+const STATE_KEY = 'geo_state';
+
+// ---- 状态：持久化到 storage.session，popup 可随时拉取 ----
+async function getState() {
+  const o = await chrome.storage.session.get(STATE_KEY);
+  return o[STATE_KEY] || { running: false, done: false, tasks: [], runId: null, stopRequested: false };
+}
+async function setState(state) {
+  await chrome.storage.session.set({ [STATE_KEY]: state });
+  // 主动推送给 popup（若打开）
+  chrome.runtime.sendMessage({ type: 'STATE_UPDATE', state }).catch(() => {});
+}
+
+// ---- 保活：长任务期间用 alarm 唤醒 SW ----
+function startKeepAlive() {
+  chrome.alarms.create('geo-keepalive', { periodInMinutes: 0.4 });
+}
+function stopKeepAlive() {
+  chrome.alarms.clear('geo-keepalive');
+}
+chrome.alarms.onAlarm.addListener(() => {}); // 唤醒即可，无需操作
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const rand = (min, max) => Math.floor(min + Math.random() * (max - min));
+// 文件名安全化：去掉路径/非法字符，限长
+const sanitize = (s) => String(s).replace(/[^\w一-龥-]+/g, '_').slice(0, 40);
+
+// 确保存在一个「活动会话」（抽屉）；没有或已删就新建一个默认抽屉。
+// 采集结果都归入活动会话。返回活动会话 id。
+async function ensureActiveSession() {
+  const sessions = await getAllSessions();
+  let activeId = await getActiveSessionId();
+  const active = sessions.find((s) => s.id === activeId && !s.deleted);
+  if (active) return active.id;
+
+  // 退而求其次：用最近一个未删除的会话
+  const alive = sessions.filter((s) => !s.deleted).sort((a, b) => b.createdAt - a.createdAt);
+  if (alive.length) {
+    await setActiveSessionId(alive[0].id);
+    return alive[0].id;
+  }
+
+  // 都没有，新建默认抽屉
+  const id = `sess_${Date.now()}`;
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const title = `采集 ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  await createSession({ id, title, createdAt: Date.now(), deleted: false });
+  await setActiveSessionId(id);
+  return id;
+}
+
+// ---- 消息入口 ----
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  (async () => {
+    switch (msg.type) {
+      case 'GET_STATE':
+        sendResponse(await getState());
+        break;
+      case 'START':
+        sendResponse({ ok: true });
+        runBatch(msg.keywords, msg.platforms); // 不 await，后台跑
+        break;
+      case 'COLLECT_CURRENT':
+        sendResponse({ ok: true });
+        collectCurrentPage(); // 采集当前活动标签页，追加到结果
+        break;
+      case 'STOP': {
+        const s = await getState();
+        s.stopRequested = true;
+        await setState(s);
+        sendResponse({ ok: true });
+        break;
+      }
+      default:
+        sendResponse({ ok: false, error: 'unknown message' });
+    }
+  })();
+  return true; // 异步 sendResponse
+});
+
+// ---- 批量调度：严格串行 ----
+async function runBatch(keywords, platforms) {
+  const runId = `run_${Date.now()}`;
+  const sessionId = await ensureActiveSession(); // 采集进当前打开的抽屉
+
+  const tasks = [];
+  for (const platform of platforms) {
+    for (const keyword of keywords) {
+      tasks.push({ platform, keyword, status: 'pending' });
+    }
+  }
+  await setState({ running: true, done: false, tasks, runId, stopRequested: false });
+  startKeepAlive();
+
+  for (let i = 0; i < tasks.length; i++) {
+    let state = await getState();
+    if (state.stopRequested) break;
+
+    tasks[i].status = 'running';
+    await setState({ ...state, tasks });
+
+    const result = await runOneTask(tasks[i]);
+    Object.assign(tasks[i], result);
+    await saveResult({ sessionId, runId, ...tasks[i], ...result });
+
+    state = await getState();
+    await setState({ ...state, tasks });
+
+    // 拟人间隔（最后一条不等）
+    if (i < tasks.length - 1) await sleep(rand(8000, 15000));
+  }
+
+  const final = await getState();
+  await setState({ ...final, running: false, done: true });
+  stopKeepAlive();
+}
+
+// ---- 单任务：打开 tab → 注入 → 调用 adapter 入口 ----
+async function runOneTask(task) {
+  const cfg = PLATFORMS[task.platform];
+  if (!cfg) return { status: 'failed', error: 'unsupported_platform' };
+
+  let tab;
+  try {
+    // 复用已有该平台 tab，否则新开
+    const existing = (await chrome.tabs.query({})).find((t) => t.url && cfg.match.test(t.url));
+    if (existing) {
+      tab = existing;
+      await chrome.tabs.update(tab.id, { url: cfg.newConversationUrl, active: true });
+    } else {
+      tab = await chrome.tabs.create({ url: cfg.newConversationUrl, active: true });
+    }
+    await waitTabComplete(tab.id, 60000);
+    await sleep(rand(2000, 3500));
+
+    // 注入 common + adapter
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['src/content/common.js', ...cfg.files],
+    });
+
+    // 调用 adapter 入口
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (entryName, query, config) => globalThis[entryName](query, config),
+      args: [cfg.entry, task.keyword, cfg.config || {}],
+    });
+
+    const out = result || { status: 'failed', error: 'no_result' };
+
+    // 采集成功才截图（整页滚动拼接）
+    if (out.status === 'ok') {
+      await attachScreenshot(out, tab, task.platform, task.keyword);
+    }
+
+    return out;
+  } catch (e) {
+    return { status: 'failed', error: String(e && e.message || e) };
+  }
+}
+
+// 整页截图并存库，把 screenshotId 挂到 out 上（失败静默）
+async function attachScreenshot(out, tab, platform, keyword) {
+  try {
+    const blob = await captureFullPage(tab.id, tab.windowId);
+    if (blob) {
+      const shotId = `${platform}_${sanitize(keyword)}_${Date.now()}`;
+      await saveScreenshot(shotId, blob);
+      out.screenshotId = shotId;
+    }
+  } catch (e) {
+    console.warn('[GEO] 截图阶段异常:', e);
+  }
+}
+
+// ---- 仅采集当前页：不输入不导航，直接对已打开、已出答案的页面采集并追加入库 ----
+async function collectCurrentPage() {
+  const runId = `collect_${Date.now()}`;
+  const sessionId = await ensureActiveSession();
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.url) {
+      await pushCollectResult({ sessionId, status: 'failed', error: 'no_active_tab' });
+      return;
+    }
+
+    // 识别平台
+    const platform = Object.keys(PLATFORMS).find((k) => PLATFORMS[k].match.test(tab.url));
+    if (!platform) {
+      await pushCollectResult({ sessionId, status: 'failed', error: 'unsupported_page', keyword: tab.title || tab.url });
+      return;
+    }
+    const cfg = PLATFORMS[platform];
+    if (!cfg.collectEntry) {
+      await pushCollectResult({ sessionId, status: 'failed', error: 'collect_not_supported', platform, keyword: tab.title || '' });
+      return;
+    }
+
+    startKeepAlive();
+
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['src/content/common.js', ...cfg.files],
+    });
+
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (entryName, config) => globalThis[entryName](config),
+      args: [cfg.collectEntry, cfg.config || {}],
+    });
+
+    const out = result || { status: 'failed', error: 'no_result' };
+    out.platform = platform;
+    if (!out.keyword) out.keyword = tab.title || '当前页面';
+
+    if (out.status === 'ok') {
+      await attachScreenshot(out, tab, platform, out.keyword);
+    }
+
+    await pushCollectResult({ sessionId, runId, ...out });
+  } catch (e) {
+    await pushCollectResult({ sessionId, status: 'failed', error: String(e && e.message || e) });
+  } finally {
+    stopKeepAlive();
+  }
+}
+
+// 把单条采集结果存库并合并进当前任务列表（追加，不清空历史）
+async function pushCollectResult(rec) {
+  await saveResult(rec);
+  const state = await getState();
+  const tasks = Array.isArray(state.tasks) ? state.tasks.slice() : [];
+  tasks.push({ platform: rec.platform || '当前页', keyword: rec.keyword || '当前页面', status: rec.status, answerChars: rec.answerChars, error: rec.error });
+  await setState({ ...state, tasks, done: true });
+}
+
+function waitTabComplete(tabId, timeout) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { cleanup(); resolve(); }, timeout);
+    const listener = (id, info) => {
+      if (id === tabId && info.status === 'complete') { cleanup(); resolve(); }
+    };
+    function cleanup() {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
