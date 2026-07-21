@@ -54,11 +54,22 @@ function statusText(status, t = {}) {
   switch (status) {
     case 'ok': return `✓ ${t.answerChars || 0}字`;
     case 'running': return '采集中…';
-    case 'failed': return '✗ 失败';
+    case 'failed': return `✗ ${t.error || '失败'}`;
     case 'login_required': return '需登录';
     case 'pending': return '等待';
     default: return status;
   }
+}
+
+// 失败详情（含 error + trace）拼成可读文本，用于 tooltip / 展开
+function failDetail(t = {}) {
+  const lines = [];
+  if (t.error) lines.push('错误：' + t.error);
+  if (Array.isArray(t.trace) && t.trace.length) {
+    lines.push('步骤：');
+    t.trace.forEach((s, i) => lines.push(`  ${i + 1}. ${s}`));
+  }
+  return lines.join('\n');
 }
 
 // ---- 会话抽屉 ----
@@ -210,6 +221,7 @@ function itemEl(it) {
   const st = document.createElement('span');
   st.className = `item-status status-${it.status}`;
   st.textContent = statusText(it.status, it);
+  if (it.status === 'failed') st.title = failDetail(it) || '失败';
 
   const del = document.createElement('button');
   del.className = 'link-btn';
@@ -256,7 +268,9 @@ els.exportBtn.addEventListener('click', async () => {
   const original = els.exportBtn.textContent;
   els.exportBtn.textContent = '导出中…';
   try {
-    const { count } = await exportAll();
+    const activeId = await getActiveSessionId();
+    if (!activeId) throw new Error('请先打开一个会话再导出');
+    const { count } = await exportAll(activeId);
     els.exportBtn.textContent = `已导出 ${count} 条`;
     setTimeout(() => { els.exportBtn.textContent = original; els.exportBtn.disabled = false; }, 2500);
   } catch (e) {
@@ -298,12 +312,29 @@ function render(state) {
   els.taskLog.innerHTML = '';
   for (const t of tasks) {
     const li = document.createElement('li');
+    const row = document.createElement('div');
+    row.className = 'log-row';
     const name = document.createElement('span');
     name.textContent = `${t.keyword} · ${t.platform}`;
     const st = document.createElement('span');
     st.className = `status-${t.status}`;
     st.textContent = statusText(t.status, t);
-    li.append(name, st);
+    row.append(name, st);
+    li.appendChild(row);
+
+    // 失败：附可折叠的 trace/错误详情，方便排查
+    const detail = failDetail(t);
+    if (t.status === 'failed' && detail) {
+      const pre = document.createElement('pre');
+      pre.className = 'log-detail';
+      pre.textContent = detail;
+      row.style.cursor = 'pointer';
+      row.title = '点击展开/折叠详情';
+      row.addEventListener('click', () => {
+        pre.style.display = pre.style.display === 'block' ? 'none' : 'block';
+      });
+      li.appendChild(pre);
+    }
     els.taskLog.appendChild(li);
   }
 }

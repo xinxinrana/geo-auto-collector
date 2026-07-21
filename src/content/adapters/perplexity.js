@@ -1,74 +1,105 @@
-// perplexity.js — Perplexity 平台 adapter。注入后由 SW 调用。
-// 两个入口，互相独立：
-//   runPerplexityTask(query, config)  —— 全流程：输入→提交→判完成→采集
+// perplexity.js — Perplexity 平台 adapter
+// 入口:
+//   runPerplexityTask(query, config)  —— 全流程
 //   collectPerplexityPage(config)     —— 仅采集当前已打开、已出答案的页面
-// 依赖 common.js 已注入的 globalThis.GEO。
+//
+// DOM 参考: docs/adapters/perplexity.md
+// 关键锚:
+//   输入框: div[role=textbox][contenteditable=true] (取靠底部的 followup)
+//   发送按钮: button[aria-label="Submit"]
+//   停止按钮: button[aria-label^="Stop response"] (生成中同位置替换)
+//   QA 容器: main .focus\:outline-none div.flex.flex-col.gap-y-md (每轮一个)
 
 (function () {
   const G = globalThis.GEO;
 
   async function findInput() {
-    const selectors = ['div[role=textbox]', 'textarea', '[contenteditable=true]'];
+    // 优先取 main 里最靠底部的可编辑框
     for (let attempt = 0; attempt < 20; attempt++) {
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el && el.offsetParent !== null) return el;
+      const list = [
+        ...document.querySelectorAll('main div[role=textbox][contenteditable=true], main textarea, div[role=textbox][contenteditable=true], textarea'),
+      ].filter((e) => e.offsetParent !== null);
+      if (list.length) {
+        list.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+        return list[0];
       }
       await G.sleep(500);
     }
     return null;
   }
 
-  async function expandSources() {
-    const labels = ['个来源', '来源', 'Sources', 'sources'];
+  function findSendButton() {
+    const b = document.querySelector('button[aria-label="Submit"]');
+    if (b && b.offsetParent !== null && getComputedStyle(b).pointerEvents !== 'none') return b;
+    return null;
+  }
+
+  function isPerplexityGenerating() {
+    return !!document.querySelector('button[aria-label^="Stop response"]');
+  }
+
+  // 展开来源:点 "个来源" / "Sources"
+  async function expandSources(root) {
+    const scope = root || document;
+    const labels = ['个来源', '来源', 'Sources', 'sources', 'Show sources'];
     for (const label of labels) {
-      const btn = [...document.querySelectorAll('button, div[role=button], span')]
+      const btn = [...scope.querySelectorAll('button, div[role=button], span')]
         .find((e) => e.textContent && e.textContent.includes(label) && e.offsetParent !== null);
-      if (btn) {
-        try { btn.click(); await G.sleep(2000); return true; } catch {}
-      }
+      if (btn) { try { btn.click(); await G.sleep(1500); return true; } catch {} }
     }
     return false;
   }
 
-  // 定位回答正文容器，尽量避开导航/侧栏
-  function answerRoot() {
-    const candidates = ['main', '[class*=answer]', '[class*=prose]', '[data-testid*=answer]'];
-    for (const sel of candidates) {
-      const el = document.querySelector(sel);
-      if (el && (el.innerText || '').length > 50) return el;
+  // 找每轮 QA 容器,取最后一个
+  function findLastQA() {
+    // 主选择器
+    const qas = [...document.querySelectorAll('main .focus\\:outline-none div.flex.flex-col.gap-y-md')].filter((e) => e.offsetParent !== null);
+    if (qas.length) {
+      const last = qas[qas.length - 1];
+      const children = [...last.children];
+      return {
+        userItem: children[0] || null,
+        assistantItem: children[1] || null,
+        qaAncestor: last,
+      };
     }
-    return document.body;
+    return null;
   }
 
-  // 从当前页提取：展开来源 → 抓正文/引用/DOM。ensureComplete=true 时先等生成结束。
-  async function collect(config = {}, ensureComplete = true) {
-    const cfg = { minChars: 1200, maxWait: 180000, stableNeeded: 4, ...config };
-    const root = answerRoot();
+  function answerRoot(qa) {
+    const q = qa || findLastQA();
+    if (q && q.assistantItem) {
+      const md = q.assistantItem.querySelector('.prose.dark\\:prose-invert') || q.assistantItem.querySelector('.prose') || q.assistantItem.querySelector('[class*=prose]');
+      return md || q.assistantItem;
+    }
+    // fallback:整个 main
+    return document.querySelector('main') || document.body;
+  }
+
+  function loginRequired() {
+    return /\/login|signin/i.test(location.href);
+  }
+
+  async function collect(config = {}, ensureComplete = true, tr = null) {
+    const cfg = { minChars: 300, maxWait: 180000, ...config };
+    const qa = findLastQA();
+    if (tr) tr.push('findLastQA', qa ? { hasUser: !!qa.userItem, hasAssist: !!qa.assistantItem } : null);
+    const root = answerRoot(qa);
+    if (tr) tr.push('answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
-    if (ensureComplete) {
-      const r = await G.waitAnswerComplete({
-        root,
-        minChars: cfg.minChars,
-        maxWait: cfg.maxWait,
-        stableNeeded: cfg.stableNeeded,
-      });
-      text = r.text;
-      timedOut = r.timedOut;
+    if (ensureComplete || isPerplexityGenerating()) {
+      const r = await G.waitAnswerComplete({ root, minChars: cfg.minChars, maxWait: cfg.maxWait });
+      text = r.text; timedOut = r.timedOut;
     } else {
-      // 仅采集当前页：不重新等待，若仍在生成则短等一下
-      if (G.isGenerating()) {
-        const r = await G.waitAnswerComplete({ root, minChars: cfg.minChars, maxWait: 60000, stableNeeded: cfg.stableNeeded });
-        text = r.text;
-        timedOut = r.timedOut;
-      } else {
-        text = (root.innerText || '').trim();
-      }
+      text = (root.innerText || '').trim();
     }
+    if (tr) tr.push('collected', { chars: text.length, timedOut });
 
-    await expandSources();
-    const citations = G.extractCitations();
+    // 展开来源(限定 QA 内)
+    await expandSources(qa ? qa.qaAncestor : null);
+    const citations = G.extractCitations({ root: qa ? qa.qaAncestor : (document.querySelector('main') || document.body) });
+    if (tr) tr.push('citations', { n: citations.length });
 
     return {
       status: 'ok',
@@ -76,60 +107,76 @@
       answerHtml: root.innerHTML,
       answerChars: text.length,
       citations,
-      domHtml: root.outerHTML,
+      qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
+      qaSelector: 'main .focus\\:outline-none div.flex.flex-col.gap-y-md',
       url: location.href,
       timedOut,
     };
   }
 
-  // 入口 1：全流程
   globalThis.runPerplexityTask = async function (query, config = {}) {
+    const tr = G.makeTrace();
+    tr.push('runPerplexityTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
       const box = await findInput();
-      if (!box) return { status: 'failed', error: 'input_not_found' };
+      if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
+      tr.push('input found', { tag: box.tagName, editable: box.isContentEditable });
 
       await G.humanType(box, query);
-      await G.sleep(G.rand(300, 600));
+      tr.push('typed');
+      await G.sleep(G.rand(400, 800));
 
-      box.focus();
-      box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-      box.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+      const sendBtn = findSendButton();
+      if (sendBtn) {
+        sendBtn.click();
+        tr.push('sent via Submit button');
+      } else {
+        box.focus();
+        box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+        box.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+        tr.push('sent via Enter');
+      }
 
       await G.sleep(3000);
+      if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
 
-      if (location.href.includes('/login') || location.href.includes('signin')) {
-        return { status: 'login_required' };
-      }
-
-      return await collect(config, true);
-    } catch (e) {
-      return { status: 'failed', error: String(e && e.message || e) };
-    }
-  };
-
-  // 入口 2：仅采集当前页面（页面已由用户手动打开并已出答案）
-  globalThis.collectPerplexityPage = async function (config = {}) {
-    try {
-      if (location.href.includes('/login') || location.href.includes('signin')) {
-        return { status: 'login_required' };
-      }
-      const root = answerRoot();
-      if ((root.innerText || '').trim().length < 20) {
-        return { status: 'failed', error: 'no_answer_on_page' };
-      }
-      // 从 URL 或页面推断关键词（首个用户提问）
-      const keyword = inferKeyword();
-      const out = await collect(config, false);
-      out.keyword = keyword;
+      const out = await collect(config, true, tr);
+      out.trace = tr.steps;
       return out;
     } catch (e) {
-      return { status: 'failed', error: String(e && e.message || e) };
+      tr.push('exception', String(e && e.message || e));
+      return { status: 'failed', error: String(e && e.message || e), trace: tr.steps };
     }
   };
 
-  // 尝试推断当前对话的关键词：优先 h1/首个标题，退化到 document.title
-  function inferKeyword() {
-    const h1 = document.querySelector('h1');
+  globalThis.collectPerplexityPage = async function (config = {}) {
+    const tr = G.makeTrace();
+    tr.push('collectPerplexityPage start', { url: location.href });
+    try {
+      if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
+      const qa = findLastQA();
+      if (!qa || !qa.assistantItem) {
+        const root = answerRoot(null);
+        if ((root.innerText || '').trim().length < 50) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
+      }
+      const out = await collect(config, false, tr);
+      out.keyword = inferKeyword(qa);
+      out.trace = tr.steps;
+      return out;
+    } catch (e) {
+      tr.push('exception', String(e && e.message || e));
+      return { status: 'failed', error: String(e && e.message || e), trace: tr.steps };
+    }
+  };
+
+  function inferKeyword(qa) {
+    const q = qa || findLastQA();
+    if (q && q.userItem) {
+      const t = (q.userItem.innerText || '').trim();
+      if (t.length > 1) return t.slice(0, 200);
+    }
+    // fallback: h1 / title
+    const h1 = document.querySelector('main h1');
     if (h1 && h1.textContent && h1.textContent.trim().length > 1) return h1.textContent.trim().slice(0, 200);
     const t = (document.title || '').replace(/\s*[|\-–]\s*Perplexity.*$/i, '').trim();
     return t || '当前页面';

@@ -98,7 +98,7 @@ function recordCard(r, idx) {
 
     <h3>完整对话 DOM</h3>
     <button class="dom-toggle" onclick="var e=document.getElementById('${domId}');e.style.display=e.style.display==='none'?'block':'none';">展开 / 折叠 DOM</button>
-    <pre id="${domId}" class="dom" style="display:none">${esc(r.domHtml || '')}</pre>
+    <pre id="${domId}" class="dom" style="display:none">${esc(r.qaHtml || r.domHtml || '')}</pre>
   </article>`;
 }
 

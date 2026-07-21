@@ -12,24 +12,25 @@ function tsStamp() {
 
 const sanitize = (s) => String(s).replace(/[^\w一-龥-]+/g, '_').slice(0, 40);
 
-// 返回 { count } 或抛错。只导出「未删除的会话」中「未删除的结果」。
-export async function exportAll() {
+// 只导出指定会话（当前选中的会话）内、未删除的结果。
+// sessionId 必填：由 popup 传入当前活动会话 id。
+export async function exportAll(sessionId) {
   const JSZip = window.JSZip;
   if (!JSZip) throw new Error('JSZip 未加载');
+  if (!sessionId) throw new Error('请先选择（打开）一个会话再导出');
 
   const [allRecords, sessions] = await Promise.all([getAllResults(), getAllSessions()]);
 
-  // 被删除的会话 id
-  const deletedSessions = new Set(sessions.filter((s) => s.deleted).map((s) => s.id));
-  const sessionTitle = new Map(sessions.map((s) => [s.id, s.title]));
+  const session = sessions.find((s) => s.id === sessionId);
+  const title = session ? session.title : '未分组（历史）';
 
-  // 过滤：跳过被删的记录、被删会话下的记录
-  const records = allRecords.filter((r) => !r.deleted && !deletedSessions.has(r.sessionId));
-  if (!records.length) throw new Error('没有可导出的结果（可能都已删除），请先采集或恢复');
+  // 只取当前会话、未删除的结果
+  const records = allRecords.filter((r) => !r.deleted && r.sessionId === sessionId);
+  if (!records.length) throw new Error('当前会话没有可导出的结果，请先采集或恢复');
 
   // 补上会话标题，供报告分组
   for (const r of records) {
-    r.sessionTitle = sessionTitle.get(r.sessionId) || '未分组（历史）';
+    r.sessionTitle = title;
   }
 
   const zip = new JSZip();
@@ -55,7 +56,7 @@ export async function exportAll() {
 
   const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
   const url = URL.createObjectURL(zipBlob);
-  const filename = `GEO采集_${tsStamp()}.zip`;
+  const filename = `GEO采集_${sanitize(title)}_${tsStamp()}.zip`;
 
   await chrome.downloads.download({ url, filename, saveAs: true });
   // 延迟释放，确保下载已读取

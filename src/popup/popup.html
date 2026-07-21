@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>GEO 自动采集</h1>
-    <span id="version">v0.1.0</span>
+    <span id="version">v0.2.0</span>
   </header>
 
   <section id="input-section">
@@ -19,9 +19,12 @@
     <label>检测平台</label>
     <div id="platforms" class="platform-list">
       <label class="platform"><input type="checkbox" value="perplexity" checked /> Perplexity</label>
-      <label class="platform disabled"><input type="checkbox" value="chatgpt" disabled /> ChatGPT <em>(即将支持)</em></label>
-      <label class="platform disabled"><input type="checkbox" value="gemini" disabled /> Gemini <em>(即将支持)</em></label>
-      <label class="platform disabled"><input type="checkbox" value="claude" disabled /> Claude <em>(即将支持)</em></label>
+      <label class="platform"><input type="checkbox" value="chatgpt" /> ChatGPT</label>
+      <label class="platform"><input type="checkbox" value="gemini" /> Gemini</label>
+      <label class="platform"><input type="checkbox" value="claude" /> Claude</label>
+      <label class="platform"><input type="checkbox" value="doubao" /> 豆包</label>
+      <label class="platform"><input type="checkbox" value="yuanbao" /> 元宝</label>
+      <label class="platform"><input type="checkbox" value="kimi" /> Kimi</label>
     </div>
   </section>
 
@@ -32,7 +35,7 @@
 
   <section id="controls-secondary">
     <button id="collect-btn">采集当前页面</button>
-    <button id="export-btn">导出结果</button>
+    <button id="export-btn">导出当前会话</button>
   </section>
 
   <section id="progress-section" hidden>

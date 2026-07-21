@@ -90,8 +90,27 @@ button.danger { background: #fff; color: #dc2626; border-color: #fca5a5; }
 #task-log li {
   padding: 3px 0;
   border-bottom: 1px solid #f3f4f6;
+}
+.log-row {
   display: flex;
   justify-content: space-between;
+  gap: 8px;
+}
+.log-row > span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-row > span:last-child { white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
+.log-detail {
+  display: none;
+  margin: 4px 0 2px;
+  padding: 6px 8px;
+  background: #1e1e2e;
+  color: #f8b4b4;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
 }
 .status-ok { color: #16a34a; }
 .status-running { color: #2563eb; }

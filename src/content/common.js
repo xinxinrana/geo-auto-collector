@@ -8,6 +8,24 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const rand = (min, max) => Math.floor(min + Math.random() * (max - min));
 
+  // 日志：打印到目标页控制台，统一前缀便于过滤
+  function log(...args) {
+    try { console.log('[GEO]', ...args); } catch {}
+  }
+
+  // 追踪器：收集分步日志，随结果返回，便于在 SW/popup 排查失败点
+  function makeTrace() {
+    const steps = [];
+    return {
+      push(msg, extra) {
+        const line = extra !== undefined ? `${msg} ${typeof extra === 'object' ? JSON.stringify(extra) : extra}` : msg;
+        steps.push(line);
+        log(line);
+      },
+      steps,
+    };
+  }
+
   // 停止/生成中按钮检测（多平台通用选择器，命中即认为仍在生成）
   const STOP_SELECTORS = [
     'button[data-testid=stop-button]',
@@ -25,17 +43,19 @@
     return false;
   }
 
-  // 迁移 wait_generation：停止按钮消失 + 文本长度连续稳定 + 最小字符 + 超时兜底
+  // 等生成结束。两条独立的完成信号,任一命中立即返回,不做叠加等待:
+  //   A) 曾经看到过 stop 按钮,现在消失了 → 强信号,立即采集
+  //   B) 文本长度 > minChars,且相邻两次 poll(默认 3s)长度未变 → 视为写完
+  // 首次 poll 前 sleep(poll):给页面时间开始生成、以及给 stop 按钮时间挂上 DOM。
   async function waitAnswerComplete(opts = {}) {
     const {
       root = document.body,
-      minChars = 1200,
+      minChars = 300,
       maxWait = 180000,
-      stableNeeded = 4,
       poll = 3000,
     } = opts;
-    let prevLen = 0;
-    let stable = 0;
+
+    let prevLen = -1;
     let waited = 0;
     let sawGenerating = false;
 
@@ -45,17 +65,15 @@
       const txt = (root.innerText || '').trim();
       const len = txt.length;
       const gen = isGenerating();
-      if (gen) sawGenerating = true;
-      if (len === prevLen) stable++;
-      else stable = 0;
-      prevLen = len;
+      if (gen) { sawGenerating = true; prevLen = len; continue; }
 
-      if (!gen && stable >= stableNeeded && len > minChars) {
-        // 若全程没检测到停止按钮，要求更长稳定窗口兜底
-        if (sawGenerating || stable >= stableNeeded + 2) {
-          return { text: txt, timedOut: false };
-        }
-      }
+      // 信号 A:曾经在生成,现在 stop 按钮消失 —— 立即返回
+      if (sawGenerating) return { text: txt, timedOut: false };
+
+      // 信号 B:字数达标 + 相邻两次不变
+      if (len >= minChars && len === prevLen) return { text: txt, timedOut: false };
+
+      prevLen = len;
     }
     return { text: (root.innerText || '').trim(), timedOut: true };
   }
@@ -94,6 +112,7 @@
       'perplexity', 'google.com', 'gstatic', 'openai', 'chatgpt',
       'gemini', 'googleusercontent', 'googletagmanager',
     ];
+    const root = opts.root || document.body;
     const map = new Map();
     const add = (href) => {
       if (!href || !href.startsWith('http')) return;
@@ -104,16 +123,78 @@
       if (!map.has(host)) map.set(host, { domain: host, count: 0, sampleUrl: href });
       map.get(host).count++;
     };
-    document.querySelectorAll('a[href^="http"]').forEach((a) => add(a.getAttribute('href')));
+    root.querySelectorAll('a[href^="http"]').forEach((a) => add(a.getAttribute('href')));
     // 通用来源容器（Gemini chip 等）
     const selectors = ['[class*=citation] a', '[class*=source] a', 'sources-list a', '[data-url]', '[data-href]'];
     selectors.forEach((sel) => {
-      document.querySelectorAll(sel).forEach((el) => {
+      root.querySelectorAll(sel).forEach((el) => {
         ['href', 'data-url', 'data-href'].forEach((attr) => add(el.getAttribute(attr)));
       });
     });
     return [...map.values()];
   }
 
-  globalThis.GEO = { sleep, rand, isGenerating, waitAnswerComplete, humanType, extractCitations };
+  // ---- QA 节点通用工具:限定 root 内做问题文本反查 → 找回答 → 计算最小公共祖先 ----
+  // 适用于 adapter 里 "结构选择器失效时的 fallback",或作为 collect 模式的锚点。
+  // opts:
+  //   root        —— 搜索根(默认 <main> || document.body)
+  //   excludeSel  —— 排除的祖先选择器(默认 sidebar/nav/history)
+  //   maxRatio    —— 匹配节点 innerText 长度不超过 query.length * maxRatio (默认 8)
+  //   answerRatio —— 助手节点 innerText 长度阈值:>= query.length * answerRatio (默认 1.5)
+  // 返回: { userNode, assistantNode, qaAncestor } 或 null
+  function findQANodeByAnchor(query, opts = {}) {
+    const {
+      root = document.querySelector('main') || document.body,
+      excludeSel = 'nav, aside, [role=navigation], [role=complementary], [class*=sidebar], [class*=history], [data-history-container]',
+      maxRatio = 8,
+      answerRatio = 1.5,
+    } = opts;
+    if (!query || query.length < 2) return null;
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    const qNorm = norm(query).toLowerCase();
+    const inSidebar = (el) => el.closest && el.closest(excludeSel);
+
+    // 遍历所有 element,收集 innerText 含 qNorm 且长度不超过阈值的节点
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    const matches = [];
+    while (walker.nextNode()) {
+      const el = walker.currentNode;
+      if (inSidebar(el)) continue;
+      const text = norm(el.innerText || '').toLowerCase();
+      if (text.includes(qNorm) && text.length < qNorm.length * maxRatio) matches.push(el);
+    }
+    // 取最短(最贴近气泡本体)的
+    matches.sort((a, b) => a.innerText.length - b.innerText.length);
+    const userNode = matches[0] || null;
+    if (!userNode) return null;
+
+    // 向后/向上找回答:兄弟层扫,找不到跳父层
+    let assistantNode = null;
+    let hopNode = userNode;
+    for (let hop = 0; hop < 12 && !assistantNode; hop++) {
+      let sib = hopNode.nextElementSibling;
+      while (sib) {
+        const sibText = norm(sib.innerText || '');
+        if (sibText.length > qNorm.length * answerRatio && !sibText.toLowerCase().includes(qNorm)) {
+          assistantNode = sib;
+          break;
+        }
+        sib = sib.nextElementSibling;
+      }
+      if (!assistantNode) hopNode = hopNode.parentElement;
+      if (!hopNode) break;
+    }
+
+    // 计算最小公共祖先
+    const ancestors = (n) => { const a = []; while (n) { a.push(n); n = n.parentElement; } return a; };
+    const aChain = ancestors(userNode);
+    const bChain = new Set(assistantNode ? ancestors(assistantNode) : []);
+    const qaAncestor = assistantNode
+      ? aChain.find((n) => bChain.has(n)) || root
+      : userNode.closest('main') || root;
+
+    return { userNode, assistantNode, qaAncestor };
+  }
+
+  globalThis.GEO = { sleep, rand, isGenerating, waitAnswerComplete, humanType, extractCitations, findQANodeByAnchor, log, makeTrace };
 })();

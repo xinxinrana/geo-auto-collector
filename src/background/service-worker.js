@@ -6,7 +6,7 @@ import {
   saveResult, saveScreenshot,
   getActiveSessionId, setActiveSessionId, getAllSessions, createSession,
 } from '../storage/db.js';
-import { captureFullPage } from '../lib/screenshot.js';
+import { captureFullPage, captureQANode } from '../lib/screenshot.js';
 
 const STATE_KEY = 'geo_state';
 
@@ -34,6 +34,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (min, max) => Math.floor(min + Math.random() * (max - min));
 // 文件名安全化：去掉路径/非法字符，限长
 const sanitize = (s) => String(s).replace(/[^\w一-龥-]+/g, '_').slice(0, 40);
+
+const task_label = (t) => `${t.keyword || '?'} · ${t.platform || '?'}`;
+
+// 把采集结果/失败打印到扩展 SW 控制台，附带 adapter 回传的 trace
+function logResult(tag, result) {
+  const r = result || {};
+  if (r.status === 'ok') {
+    console.log(`[GEO] ${tag} ✓ status=ok chars=${r.answerChars || 0} citations=${(r.citations || []).length} timedOut=${!!r.timedOut}`);
+  } else {
+    console.warn(`[GEO] ${tag} ✗ status=${r.status} error=${r.error || '(无)'}`);
+  }
+  if (Array.isArray(r.trace) && r.trace.length) {
+    console.groupCollapsed(`[GEO] ${tag} trace (${r.trace.length} 步)`);
+    r.trace.forEach((s, i) => console.log(`  ${i + 1}. ${s}`));
+    console.groupEnd();
+  }
+}
 
 // 确保存在一个「活动会话」（抽屉）；没有或已删就新建一个默认抽屉。
 // 采集结果都归入活动会话。返回活动会话 id。
@@ -112,6 +129,7 @@ async function runBatch(keywords, platforms) {
 
     const result = await runOneTask(tasks[i]);
     Object.assign(tasks[i], result);
+    logResult(`批量[${task_label(tasks[i])}]`, result);
     await saveResult({ sessionId, runId, ...tasks[i], ...result });
 
     state = await getState();
@@ -129,7 +147,9 @@ async function runBatch(keywords, platforms) {
 // ---- 单任务：打开 tab → 注入 → 调用 adapter 入口 ----
 async function runOneTask(task) {
   const cfg = PLATFORMS[task.platform];
-  if (!cfg) return { status: 'failed', error: 'unsupported_platform' };
+  if (!cfg) {
+    return { status: 'failed', error: `unsupported_platform: ${task.platform}（当前 SW 已注册：${Object.keys(PLATFORMS).join(', ')}）` };
+  }
 
   let tab;
   try {
@@ -170,10 +190,18 @@ async function runOneTask(task) {
   }
 }
 
-// 整页截图并存库，把 screenshotId 挂到 out 上（失败静默）
+// QA 节点优先截图:adapter 返回 qaSelector 时先按 QA 节点截,失败则退化到整页
 async function attachScreenshot(out, tab, platform, keyword) {
   try {
-    const blob = await captureFullPage(tab.id, tab.windowId);
+    let blob = null;
+    if (out.qaSelector) {
+      blob = await captureQANode(tab.id, tab.windowId, out.qaSelector);
+      if (blob) console.log(`[GEO] QA 节点截图成功 selector=${out.qaSelector}`);
+    }
+    if (!blob) {
+      blob = await captureFullPage(tab.id, tab.windowId);
+      if (blob) console.log(`[GEO] 退化到整页截图`);
+    }
     if (blob) {
       const shotId = `${platform}_${sanitize(keyword)}_${Date.now()}`;
       await saveScreenshot(shotId, blob);
@@ -228,8 +256,10 @@ async function collectCurrentPage() {
       await attachScreenshot(out, tab, platform, out.keyword);
     }
 
+    logResult(`采集当前页[${out.keyword} · ${platform}]`, out);
     await pushCollectResult({ sessionId, runId, ...out });
   } catch (e) {
+    console.warn('[GEO] 采集当前页异常:', e);
     await pushCollectResult({ sessionId, status: 'failed', error: String(e && e.message || e) });
   } finally {
     stopKeepAlive();
@@ -241,7 +271,7 @@ async function pushCollectResult(rec) {
   await saveResult(rec);
   const state = await getState();
   const tasks = Array.isArray(state.tasks) ? state.tasks.slice() : [];
-  tasks.push({ platform: rec.platform || '当前页', keyword: rec.keyword || '当前页面', status: rec.status, answerChars: rec.answerChars, error: rec.error });
+  tasks.push({ platform: rec.platform || '当前页', keyword: rec.keyword || '当前页面', status: rec.status, answerChars: rec.answerChars, error: rec.error, trace: rec.trace });
   await setState({ ...state, tasks, done: true });
 }
 
