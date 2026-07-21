@@ -7,6 +7,8 @@ import {
   getActiveSessionId, setActiveSessionId, getAllSessions, createSession,
 } from '../storage/db.js';
 import { captureFullPage, captureQANode } from '../lib/screenshot.js';
+import { captureNodeViaCDP } from '../lib/screenshot-cdp.js';
+import { captureNodeViaLib } from '../lib/screenshot-node.js';
 
 const STATE_KEY = 'geo_state';
 
@@ -190,22 +192,39 @@ async function runOneTask(task) {
   }
 }
 
-// QA 节点优先截图:adapter 返回 qaSelector 时先按 QA 节点截,失败则退化到整页
+// QA 节点截图:四级 fallback
+//   1) html-to-image(推荐):节点独立渲染,不受 overflow / fixed / sticky 干扰,首选
+//   2) chrome.debugger + Page.captureScreenshot(clip):还原 100%,弹官方黄条,慢一点
+//   3) captureVisibleTab + 裁剪:无黄条,但受视口限制
+//   4) 整页滚动拼接:兜底
 async function attachScreenshot(out, tab, platform, keyword) {
   try {
     let blob = null;
+    let via = null;
     if (out.qaSelector) {
-      blob = await captureQANode(tab.id, tab.windowId, out.qaSelector);
-      if (blob) console.log(`[GEO] QA 节点截图成功 selector=${out.qaSelector}`);
+      blob = await captureNodeViaLib(tab.id, out.qaSelector);
+      if (blob) via = 'html-to-image';
+      if (!blob) {
+        blob = await captureNodeViaCDP(tab.id, out.qaSelector);
+        if (blob) via = 'cdp';
+      }
+      if (!blob) {
+        blob = await captureQANode(tab.id, tab.windowId, out.qaSelector);
+        if (blob) via = 'visible-tab';
+      }
     }
     if (!blob) {
       blob = await captureFullPage(tab.id, tab.windowId);
-      if (blob) console.log(`[GEO] 退化到整页截图`);
+      if (blob) via = 'fullpage';
     }
     if (blob) {
+      console.log(`[GEO] 截图成功 via=${via} size=${blob.size} selector=${out.qaSelector || '(none)'}`);
       const shotId = `${platform}_${sanitize(keyword)}_${Date.now()}`;
       await saveScreenshot(shotId, blob);
       out.screenshotId = shotId;
+      out.screenshotVia = via;
+    } else {
+      console.warn('[GEO] 所有截图方案都失败');
     }
   } catch (e) {
     console.warn('[GEO] 截图阶段异常:', e);

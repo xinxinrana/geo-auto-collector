@@ -196,5 +196,54 @@
     return { userNode, assistantNode, qaAncestor };
   }
 
-  globalThis.GEO = { sleep, rand, isGenerating, waitAnswerComplete, humanType, extractCitations, findQANodeByAnchor, log, makeTrace };
+  // ---- DOM 节点截图 ----
+  // 依赖 html-to-image(在 SW 里通过 chrome.scripting.executeScript files 注入 src/lib/html-to-image.min.js)
+  // 优势:节点独立渲染,不受父容器 overflow / fixed / sticky 影响,一次出图不用分段
+  // 参数: selector 或 node,可选 opts 传给 html-to-image
+  // 返回: { dataUrl, width, height } 或 { error }
+  async function captureNode(target, opts = {}) {
+    let node;
+    if (typeof target === 'string') {
+      const list = [...document.querySelectorAll(target)].filter((e) => e.offsetParent !== null);
+      node = list[list.length - 1];
+    } else {
+      node = target;
+    }
+    if (!node) return { error: 'node_not_found' };
+    if (!globalThis.htmlToImage) return { error: 'html_to_image_not_loaded' };
+
+    // 让节点在视口内以避免 lazy image 尚未加载
+    try { node.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch {}
+    // 等图片、字体加载完成
+    await sleep(300);
+    try {
+      if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    } catch {}
+
+    const rect = node.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2); // 限制 dpr 避免超大文件
+    try {
+      const dataUrl = await globalThis.htmlToImage.toPng(node, {
+        pixelRatio: dpr,
+        cacheBust: true,
+        // 白底(避免透明背景在 dark 模式下看不清)
+        backgroundColor: opts.backgroundColor || '#ffffff',
+        // 跳过失败的资源,不整张丢
+        skipFonts: false,
+        // 缓解某些平台 <img> 跨域的 tainted
+        imagePlaceholder:
+          'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
+        ...opts,
+      });
+      return {
+        dataUrl,
+        width: Math.round(rect.width * dpr),
+        height: Math.round(rect.height * dpr),
+      };
+    } catch (e) {
+      return { error: String(e && e.message || e) };
+    }
+  }
+
+  globalThis.GEO = { sleep, rand, isGenerating, waitAnswerComplete, humanType, extractCitations, findQANodeByAnchor, captureNode, log, makeTrace };
 })();
