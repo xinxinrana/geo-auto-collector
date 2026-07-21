@@ -103,6 +103,49 @@
     return /\/login|from_login=1|passport\./i.test(location.href);
   }
 
+  // 豆包是虚拟列表: .list_items 里的 .v_list_row 全是 position:absolute + transform。
+  // 直接截 .list_items 会导致 html-to-image 在独立 SVG 中丢失虚拟列表布局,
+  // 且会混入历史消息/指示器。这里把当前 QA 对克隆到一个临时、自然流式的 wrapper 里,
+  // 返回其 selector 给截图流程,截图后 common.js 会自动清理该 wrapper。
+  function buildShotSelector(qa) {
+    if (!qa || !qa.assistantItem) return null;
+    // 清理历史临时截图包装器,避免累积
+    try { document.querySelectorAll('.geo-shot-wrapper').forEach((el) => el.remove()); } catch {}
+    const id = 'geo-shot-' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    const wrapper = document.createElement('div');
+    wrapper.id = id;
+    wrapper.className = 'geo-shot-wrapper';
+    wrapper.style.cssText = [
+      'position:absolute',
+      'left:0',
+      'top:0',
+      'z-index:-9999',
+      'opacity:1',
+      'background:#ffffff',
+      'max-width:900px',
+      'width:max-content',
+      'pointer-events:none',
+    ].join(';');
+
+    const cloneRow = (row) => {
+      const c = row.cloneNode(true);
+      // 覆盖虚拟列表的 absolute/transform,让问答在自然流中垂直排列
+      c.style.position = 'static';
+      c.style.transform = 'none';
+      c.style.top = 'auto';
+      c.style.left = 'auto';
+      c.style.width = '100%';
+      c.style.maxHeight = 'none';
+      c.style.overflow = 'visible';
+      return c;
+    };
+
+    if (qa.userItem) wrapper.appendChild(cloneRow(qa.userItem));
+    wrapper.appendChild(cloneRow(qa.assistantItem));
+    document.body.appendChild(wrapper);
+    return '#' + id;
+  }
+
   async function collect(config = {}, ensureComplete = true, tr = null) {
     const cfg = { minChars: 400, maxWait: 240000, ...config };
     const qa = findLastQA();
@@ -122,6 +165,9 @@
     const citations = G.extractCitations({ root: qa ? qa.assistantItem : document.body });
     if (tr) tr.push('citations', { n: citations.length });
 
+    const shotSelector = buildShotSelector(qa);
+    if (tr) tr.push('shotSelector', shotSelector);
+
     return {
       status: 'ok',
       text,
@@ -129,7 +175,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: '.list_items',
+      qaSelector: shotSelector || '.list_items',
       url: location.href,
       timedOut,
     };

@@ -203,11 +203,14 @@
   // 返回: { dataUrl, width, height } 或 { error }
   async function captureNode(target, opts = {}) {
     let node;
+    let isTempShot = false;
     if (typeof target === 'string') {
       const list = [...document.querySelectorAll(target)].filter((e) => e.offsetParent !== null);
       node = list[list.length - 1];
+      isTempShot = target.startsWith('#geo-shot-');
     } else {
       node = target;
+      isTempShot = !!(node && node.id && String(node.id).startsWith('geo-shot-'));
     }
     if (!node) return { error: 'node_not_found' };
     if (!globalThis.htmlToImage) return { error: 'html_to_image_not_loaded' };
@@ -235,12 +238,14 @@
           'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
         ...opts,
       });
+      if (isTempShot) { try { node.remove(); } catch {} }
       return {
         dataUrl,
         width: Math.round(rect.width * dpr),
         height: Math.round(rect.height * dpr),
       };
     } catch (e) {
+      // 失败时保留临时 wrapper,让 CDP / captureVisibleTab fallback 还能命中
       return { error: String(e && e.message || e) };
     }
   }
