@@ -9,6 +9,8 @@ import {
 
 const $ = (id) => document.getElementById(id);
 
+const POPUP_INPUT_KEY = 'geo_popup_input';
+
 const els = {
   keywords: $('keywords'),
   platforms: $('platforms'),
@@ -27,6 +29,31 @@ const els = {
 
 let running = false; // 批量进行中，禁用会话操作以免混乱
 let viewExpandedId = null; // 额外展开查看的抽屉（用于已删/历史抽屉，不改变活动会话）
+
+// ---- popup 表单持久化：关键词 + 平台勾选 ----
+async function loadFormState() {
+  try {
+    const saved = await chrome.storage.local.get(POPUP_INPUT_KEY);
+    const data = saved[POPUP_INPUT_KEY];
+    if (!data) return;
+    if (typeof data.keywords === 'string') els.keywords.value = data.keywords;
+    if (Array.isArray(data.platforms)) {
+      els.platforms.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+        cb.checked = data.platforms.includes(cb.value);
+      });
+    }
+  } catch (e) {
+    console.warn('[GEO] 加载 popup 表单状态失败:', e);
+  }
+}
+
+function saveFormState() {
+  const data = {
+    keywords: els.keywords.value,
+    platforms: selectedPlatforms(),
+  };
+  chrome.storage.local.set({ [POPUP_INPUT_KEY]: data }).catch(() => {});
+}
 
 function parseKeywords() {
   return els.keywords.value
@@ -339,6 +366,11 @@ function render(state) {
   }
 }
 
-// 打开时拉取当前状态 + 渲染会话
+// 打开时：恢复表单状态、拉取当前状态、渲染会话
+loadFormState();
 send({ type: 'GET_STATE' }).then(render).catch(() => {});
 renderSessions();
+
+// 表单变化时自动持久化
+els.keywords.addEventListener('input', saveFormState);
+els.platforms.addEventListener('change', saveFormState);

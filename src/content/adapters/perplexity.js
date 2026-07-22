@@ -89,7 +89,12 @@
 
     let text, timedOut = false;
     if (ensureComplete || isPerplexityGenerating()) {
-      const r = await G.waitAnswerComplete({ root, minChars: cfg.minChars, maxWait: cfg.maxWait });
+      const r = await G.waitAnswerComplete({
+        root,
+        minChars: cfg.minChars,
+        maxWait: cfg.maxWait,
+        requireMinCharsForStable: false,
+      });
       text = r.text; timedOut = r.timedOut;
     } else {
       text = (root.innerText || '').trim();

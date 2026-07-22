@@ -43,9 +43,12 @@
     return false;
   }
 
-  // 等生成结束。两条独立的完成信号,任一命中立即返回,不做叠加等待:
+  // 等生成结束。三条独立的完成信号,任一命中立即返回,不做叠加等待:
   //   A) 曾经看到过 stop 按钮,现在消失了 → 强信号,立即采集
-  //   B) 文本长度 > minChars,且相邻两次 poll(默认 3s)长度未变 → 视为写完
+  //   B) 正文长度连续两次 poll(默认 3s)未变 → 视为写完
+  //      - GPT(requireMinCharsForStable=true): 还需满足 minChars,防止过短提前采集
+  //      - 其他平台(requireMinCharsForStable=false): 只要长度稳定即可,避免等超时
+  //   C) 达到 maxWait → 兜底返回
   // 首次 poll 前 sleep(poll):给页面时间开始生成、以及给 stop 按钮时间挂上 DOM。
   async function waitAnswerComplete(opts = {}) {
     const {
@@ -53,6 +56,10 @@
       minChars = 300,
       maxWait = 180000,
       poll = 3000,
+      // GPT 默认保持原行为,其他平台传 false 以启用"3s 稳定即采集"
+      requireMinCharsForStable = true,
+      // 平台自定义生成判断,未提供则用通用 isGenerating()
+      isGeneratingFn,
     } = opts;
 
     let prevLen = -1;
@@ -64,14 +71,18 @@
       waited += poll;
       const txt = (root.innerText || '').trim();
       const len = txt.length;
-      const gen = isGenerating();
+      const gen = typeof isGeneratingFn === 'function' ? isGeneratingFn() : isGenerating();
       if (gen) { sawGenerating = true; prevLen = len; continue; }
 
       // 信号 A:曾经在生成,现在 stop 按钮消失 —— 立即返回
       if (sawGenerating) return { text: txt, timedOut: false };
 
-      // 信号 B:字数达标 + 相邻两次不变
-      if (len >= minChars && len === prevLen) return { text: txt, timedOut: false };
+      // 信号 B:长度稳定(连续两次 poll 相同)
+      if (len > 0 && len === prevLen) {
+        if (!requireMinCharsForStable || len >= minChars) {
+          return { text: txt, timedOut: false };
+        }
+      }
 
       prevLen = len;
     }

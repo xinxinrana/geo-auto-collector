@@ -78,10 +78,20 @@
 
     let text, timedOut = false;
     if (ensureComplete) {
-      const r = await G.waitAnswerComplete({ root, minChars: cfg.minChars, maxWait: cfg.maxWait });
+      const r = await G.waitAnswerComplete({
+        root,
+        minChars: cfg.minChars,
+        maxWait: cfg.maxWait,
+        requireMinCharsForStable: false,
+      });
       text = r.text; timedOut = r.timedOut;
     } else if (G.isGenerating()) {
-      const r = await G.waitAnswerComplete({ root, minChars: cfg.minChars, maxWait: 60000 });
+      const r = await G.waitAnswerComplete({
+        root,
+        minChars: cfg.minChars,
+        maxWait: 60000,
+        requireMinCharsForStable: false,
+      });
       text = r.text; timedOut = r.timedOut;
     } else {
       text = (root.innerText || '').trim();

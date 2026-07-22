@@ -60,17 +60,69 @@
     return { userItem, assistantItem, qaAncestor: list };
   }
 
-  // 回答正文:assistant item 里的 markdown 主体
   function answerRoot(qa) {
     const q = qa || findLastQA();
     if (!q || !q.assistantItem) return document.body;
-    // 优先 markdown 类
-    const md = q.assistantItem.querySelector('.segment-content-box, .markdown, [class*=markdown], .prose');
-    return md || q.assistantItem;
+    // 优先 markdown / 内容容器类
+    const md = q.assistantItem.querySelector(
+      '.segment-content-box, .markdown, [class*="markdown"], .prose, [class*="content-box"], [class*="message-content"]'
+    );
+    if (md) return md;
+
+    // 兜底:取 assistantItem 内文本最长且包含段落/列表/代码块的内容 div
+    const divs = [...q.assistantItem.querySelectorAll('div')].filter((el) =>
+      el.querySelector('p, li, pre, table') || el.children.length === 0
+    );
+    if (divs.length) {
+      divs.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length);
+      return divs[0];
+    }
+
+    return q.assistantItem;
   }
 
   function loginRequired() {
     return /\/login|\/signin/i.test(location.href);
+  }
+
+  // Kimi 的 .chat-content-list 是整个消息列表,它在页面中通常有固定宽度 / 居中 / 左右内边距,
+  // 且用户消息右对齐。直接截该容器会把这些布局空白一起截进去,导致画面"整体偏右"。
+  // 这里把当前 QA 对 clone 到一个自然流式的临时 wrapper 里,消除容器级 margin/padding/对齐影响。
+  function buildShotSelector(qa) {
+    if (!qa || !qa.assistantItem) return null;
+    try { document.querySelectorAll('.geo-shot-wrapper').forEach((el) => el.remove()); } catch {}
+    const id = 'geo-shot-' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    const wrapper = document.createElement('div');
+    wrapper.id = id;
+    wrapper.className = 'geo-shot-wrapper';
+    wrapper.style.cssText = [
+      'position:absolute',
+      'left:0',
+      'top:0',
+      'z-index:-9999',
+      'opacity:1',
+      'background:#ffffff',
+      'max-width:900px',
+      'width:max-content',
+      'pointer-events:none',
+    ].join(';');
+
+    const cloneItem = (item) => {
+      const c = item.cloneNode(true);
+      // 移除可能影响截图对齐的容器级样式
+      c.style.margin = '0';
+      c.style.marginLeft = '0';
+      c.style.marginRight = '0';
+      c.style.padding = '0';
+      c.style.width = '100%';
+      c.style.maxWidth = 'none';
+      return c;
+    };
+
+    if (qa.userItem) wrapper.appendChild(cloneItem(qa.userItem));
+    wrapper.appendChild(cloneItem(qa.assistantItem));
+    document.body.appendChild(wrapper);
+    return '#' + id;
   }
 
   async function collect(config = {}, ensureComplete = true, tr = null) {
@@ -82,7 +134,13 @@
 
     let text, timedOut = false;
     if (ensureComplete || isKimiGenerating()) {
-      const r = await G.waitAnswerComplete({ root, minChars: cfg.minChars, maxWait: cfg.maxWait });
+      const r = await G.waitAnswerComplete({
+        root,
+        minChars: cfg.minChars,
+        maxWait: cfg.maxWait,
+        requireMinCharsForStable: false,
+        isGeneratingFn: isKimiGenerating, // 使用 Kimi 自己的生成判断,避免通用判断失效
+      });
       text = r.text; timedOut = r.timedOut;
     } else {
       text = (root.innerText || '').trim();
@@ -93,6 +151,9 @@
     const citations = G.extractCitations({ root: qa ? qa.assistantItem : document.body });
     if (tr) tr.push('citations', { n: citations.length });
 
+    const shotSelector = buildShotSelector(qa);
+    if (tr) tr.push('shotSelector', shotSelector);
+
     return {
       status: 'ok',
       text,
@@ -100,7 +161,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: '.chat-content-list',
+      qaSelector: shotSelector || '.chat-content-list',
       url: location.href,
       timedOut,
     };

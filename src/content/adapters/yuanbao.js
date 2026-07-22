@@ -80,17 +80,34 @@
   function answerRoot(qa) {
     const q = qa || findLastQA();
     if (!q || !q.assistantItem) return document.body;
-    // 元宝可能同时存在 CoT (deepsearch-cot) + 最终答案(hyc-common-markdown)
-    // 最终答案总是最后一个 .hyc-common-markdown(不在 CoT 容器内的)
-    const allMd = [...q.assistantItem.querySelectorAll('.hyc-common-markdown')];
-    // 排除 CoT 内的
-    const finalMd = allMd.filter((m) => !m.closest('.hyc-component-deepsearch-cot'));
+
+    // think / CoT 容器选择器(按优先级排序)
+    const THINK_SELECTORS = [
+      '.hyc-component-deepsearch-cot',
+      '.hyc-component-deepsearch-cot__think',
+      '.hyc-component-deepsearch-cot__think__content',
+      '.hyc-component-deepsearch-cot__think__content__item',
+      '[class*="deepsearch-cot"]',
+      '[class*="deepthink"]',
+      '[class*="reasoning-process"]',
+      '[class*="-think"]',
+    ];
+    const isInThink = (el) => THINK_SELECTORS.some((sel) => !!el.closest(sel));
+
+    // 1) 优先找不在 think 容器内的最终答案 markdown
+    const speech = q.assistantItem.querySelector('.agent-chat__conv--ai__speech_show');
+    const searchRoot = speech || q.assistantItem;
+    const allMd = [...searchRoot.querySelectorAll('.hyc-common-markdown, .hyc-content-md-done')];
+    const finalMd = allMd.filter((m) => !isInThink(m));
     if (finalMd.length) return finalMd[finalMd.length - 1];
+
+    // 2) 兜底: speech_show 容器本身(不含 toolbar / 相关问题)
+    if (speech) return speech;
+
+    // 3) 再兜底: 任意 markdown 最后一个
     if (allMd.length) return allMd[allMd.length - 1];
-    const md =
-      q.assistantItem.querySelector('.agent-chat__conv--ai__speech_show') ||
-      q.assistantItem.querySelector('[class*=markdown]');
-    return md || q.assistantItem;
+
+    return q.assistantItem;
   }
 
   function loginRequired() {
@@ -106,7 +123,12 @@
 
     let text, timedOut = false;
     if (ensureComplete || isYuanbaoGenerating()) {
-      const r = await G.waitAnswerComplete({ root, minChars: cfg.minChars, maxWait: cfg.maxWait });
+      const r = await G.waitAnswerComplete({
+        root,
+        minChars: cfg.minChars,
+        maxWait: cfg.maxWait,
+        requireMinCharsForStable: false, // 元宝正文 3s 稳定即采集,不等 minChars
+      });
       text = r.text; timedOut = r.timedOut;
     } else {
       text = (root.innerText || '').trim();

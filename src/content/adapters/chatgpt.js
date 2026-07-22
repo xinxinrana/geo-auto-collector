@@ -46,14 +46,37 @@
   }
 
   // 最后一条 assistant 消息作为正文容器
-  function answerRoot() {
+  // 优先从已定位的 QA turn(assistantItem) 里找,避免全局选择器因页面改版失效
+  function answerRoot(qa) {
+    const q = qa || findLastQA();
+    if (q && q.assistantItem) {
+      const assistantMsg = q.assistantItem.querySelector('[data-message-author-role=assistant]');
+      if (assistantMsg) {
+        // 新版/旧版 markdown 容器类名兜底
+        const md = assistantMsg.querySelector(
+          '.markdown, .prose, [class*="markdown"], [class*="MessageContent"], [class*="conversation-item"], [data-testid="conversation-turn-"] > div > div'
+        );
+        if (md) return md;
+
+        // 兜底:取 assistantMsg 内文本最长的 div
+        const divs = [...assistantMsg.querySelectorAll('div')].filter((el) => el.children.length === 0 || el.querySelector('p, li, pre, table'));
+        if (divs.length) {
+          divs.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length);
+          return divs[0];
+        }
+        return assistantMsg;
+      }
+      return q.assistantItem;
+    }
+
+    // 全局 fallback(无 QA 结构时)
     const msgs = [...document.querySelectorAll('[data-message-author-role=assistant]')];
     if (msgs.length) {
       const last = msgs[msgs.length - 1];
-      const md = last.querySelector('.markdown, .prose');
+      const md = last.querySelector('.markdown, .prose, [class*="markdown"], [class*="MessageContent"]');
       return md || last;
     }
-    const fallback = ['main [class*=markdown]', 'main .prose', 'main'];
+    const fallback = ['main [class*="markdown"]', 'main .prose', 'main'];
     for (const sel of fallback) {
       const el = document.querySelector(sel);
       if (el && (el.innerText || '').length > 50) return el;
@@ -69,7 +92,7 @@
     const cfg = { minChars: 1500, maxWait: 300000, ...config };
     const qa = findLastQA();
     if (tr) tr.push('findLastQA', qa ? { hasUser: !!qa.userItem, hasAssist: !!qa.assistantItem } : null);
-    const root = answerRoot();
+    const root = answerRoot(qa);
     if (tr) tr.push('collect answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -144,7 +167,8 @@
     tr.push('collectChatgptPage start', { url: location.href });
     try {
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
-      const root = answerRoot();
+      const qa = findLastQA();
+      const root = answerRoot(qa);
       const len = (root.innerText || '').trim().length;
       tr.push('answerRoot', { tag: root.tagName, cls: root.className, innerLen: len });
       if (len < 20) {

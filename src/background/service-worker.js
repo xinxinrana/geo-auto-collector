@@ -12,6 +12,37 @@ import { captureNodeViaLib } from '../lib/screenshot-node.js';
 
 const STATE_KEY = 'geo_state';
 
+// 把 HTML 正文里的 <img> 替换成 alt 占位文本,避免导出/渲染时图片喧宾夺主。
+// 截图走独立的 DOM/图片流程,不受影响。
+function replaceImagesWithAlt(html) {
+  if (!html || typeof html !== 'string') return html;
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    doc.querySelectorAll('img').forEach((img) => {
+      const alt = (img.getAttribute('alt') || '').trim();
+      const placeholder = alt ? `[图片: ${alt}]` : '[图片]';
+      const span = doc.createElement('span');
+      span.textContent = placeholder;
+      img.replaceWith(span);
+    });
+    return doc.body.innerHTML;
+  } catch (e) {
+    // DOMParser 异常时回退到简单正则兜底
+    return html.replace(/<img[^>]*>/gi, (match) => {
+      const alt = /alt=["']([^"']*)["']/i.exec(match)?.[1]?.trim() || '';
+      return alt ? `[图片: ${alt}]` : '[图片]';
+    });
+  }
+}
+
+function sanitizeResultHtml(out) {
+  if (!out || out.status !== 'ok') return out;
+  if (out.answerHtml) out.answerHtml = replaceImagesWithAlt(out.answerHtml);
+  if (out.qaHtml) out.qaHtml = replaceImagesWithAlt(out.qaHtml);
+  return out;
+}
+
 // ---- 状态：持久化到 storage.session，popup 可随时拉取 ----
 async function getState() {
   const o = await chrome.storage.session.get(STATE_KEY);
@@ -179,7 +210,7 @@ async function runOneTask(task) {
       args: [cfg.entry, task.keyword, cfg.config || {}],
     });
 
-    const out = result || { status: 'failed', error: 'no_result' };
+    const out = sanitizeResultHtml(result) || { status: 'failed', error: 'no_result' };
 
     // 采集成功才截图（整页滚动拼接）
     if (out.status === 'ok') {
@@ -267,7 +298,7 @@ async function collectCurrentPage() {
       args: [cfg.collectEntry, cfg.config || {}],
     });
 
-    const out = result || { status: 'failed', error: 'no_result' };
+    const out = sanitizeResultHtml(result) || { status: 'failed', error: 'no_result' };
     out.platform = platform;
     if (!out.keyword) out.keyword = tab.title || '当前页面';
 
