@@ -13,9 +13,11 @@
 (function () {
   const G = globalThis.GEO;
 
-  async function findInput() {
+  async function findInput(config = {}) {
     // 优先取 main 里最靠底部的可编辑框
     for (let attempt = 0; attempt < 20; attempt++) {
+      const configured = G.getConfiguredElement(config.inputSelector, { matcher: config.inputMatcher });
+      if (configured) return configured;
       const list = [
         ...document.querySelectorAll('main div[role=textbox][contenteditable=true], main textarea, div[role=textbox][contenteditable=true], textarea'),
       ].filter((e) => e.offsetParent !== null);
@@ -66,7 +68,9 @@
     return null;
   }
 
-  function answerRoot(qa) {
+  function answerRoot(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+    if (configured) return configured;
     const q = qa || findLastQA();
     if (q && q.assistantItem) {
       const md = q.assistantItem.querySelector('.prose.dark\\:prose-invert') || q.assistantItem.querySelector('.prose') || q.assistantItem.querySelector('[class*=prose]');
@@ -84,7 +88,7 @@
     const cfg = { minChars: 300, maxWait: 180000, ...config };
     const qa = findLastQA();
     if (tr) tr.push('findLastQA', qa ? { hasUser: !!qa.userItem, hasAssist: !!qa.assistantItem } : null);
-    const root = answerRoot(qa);
+    const root = answerRoot(qa, cfg);
     if (tr) tr.push('answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -113,7 +117,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: 'main .focus\\:outline-none div.flex.flex-col.gap-y-md',
+      qaSelector: cfg.answerSelector || 'main .focus\\:outline-none div.flex.flex-col.gap-y-md',
       url: location.href,
       timedOut,
     };
@@ -123,7 +127,7 @@
     const tr = G.makeTrace();
     tr.push('runPerplexityTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
-      const box = await findInput();
+      const box = await findInput(config);
       if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
       tr.push('input found', { tag: box.tagName, editable: box.isContentEditable });
 
@@ -161,11 +165,11 @@
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
       const qa = findLastQA();
       if (!qa || !qa.assistantItem) {
-        const root = answerRoot(null);
+        const root = answerRoot(null, config);
         if ((root.innerText || '').trim().length < 50) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
       }
       const out = await collect(config, false, tr);
-      out.keyword = inferKeyword(qa);
+      out.keyword = inferKeyword(qa, config);
       out.trace = tr.steps;
       return out;
     } catch (e) {
@@ -174,7 +178,9 @@
     }
   };
 
-  function inferKeyword(qa) {
+  function inferKeyword(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.questionSelector, { last: true, matcher: config.questionMatcher });
+    if (configured && configured.innerText?.trim().length > 1) return configured.innerText.trim().slice(0, 200);
     const q = qa || findLastQA();
     if (q && q.userItem) {
       const t = (q.userItem.innerText || '').trim();

@@ -7,9 +7,11 @@
 (function () {
   const G = globalThis.GEO;
 
-  async function findInput() {
+  async function findInput(config = {}) {
     const selectors = ['#prompt-textarea', 'div[contenteditable=true]', 'textarea[data-id]', 'textarea'];
     for (let attempt = 0; attempt < 20; attempt++) {
+      const configured = G.getConfiguredElement(config.inputSelector, { matcher: config.inputMatcher });
+      if (configured) return configured;
       for (const sel of selectors) {
         const el = document.querySelector(sel);
         if (el && el.offsetParent !== null) return el;
@@ -47,24 +49,45 @@
 
   // 最后一条 assistant 消息作为正文容器
   // 优先从已定位的 QA turn(assistantItem) 里找,避免全局选择器因页面改版失效
-  function answerRoot(qa) {
+  function answerRoot(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+    if (configured) return configured;
     const q = qa || findLastQA();
     if (q && q.assistantItem) {
       const assistantMsg = q.assistantItem.querySelector('[data-message-author-role=assistant]');
       if (assistantMsg) {
-        // 新版/旧版 markdown 容器类名兜底
-        const md = assistantMsg.querySelector(
-          '.markdown, .prose, [class*="markdown"], [class*="MessageContent"], [class*="conversation-item"], [data-testid="conversation-turn-"] > div > div'
-        );
-        if (md) return md;
+        const assistantText = (assistantMsg.innerText || '').trim();
 
-        // 兜底:取 assistantMsg 内文本最长的 div
-        const divs = [...assistantMsg.querySelectorAll('div')].filter((el) => el.children.length === 0 || el.querySelector('p, li, pre, table'));
+        // 新版/旧版 markdown 容器类名兜底
+        // 注意:stop 按钮消失时 .markdown 可能已挂载但内容尚未渲染完,
+        // 所以必须校验它确实含有文本,否则退回到 assistantMsg 本身。
+        const md = assistantMsg.querySelector(
+          '.markdown, .prose, [class*="markdown"], [class*="MessageContent"]'
+        );
+        const mdText = md ? (md.innerText || '').trim() : '';
+        // 选中 markdown 的条件:有内容,且长度不少于 assistantMsg 总文本的 30%
+        // (避免选到空占位或只含 "Worked for Xs" 的 UI 容器)
+        if (md && mdText.length > 0 && mdText.length >= Math.max(20, assistantText.length * 0.3)) {
+          return md;
+        }
+
+        // 兜底:取 assistantMsg 内文本最长且确实含文本的 div
+        const divs = [...assistantMsg.querySelectorAll('div')].filter((el) => {
+          const t = (el.innerText || '').trim();
+          return t.length > 0 && (el.children.length === 0 || el.querySelector('p, li, pre, table'));
+        });
         if (divs.length) {
           divs.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length);
-          return divs[0];
+          // 同样要求最长 div 含不少于 assistantMsg 30% 的文本,否则直接用 assistantMsg
+          const best = divs[0];
+          const bestText = (best.innerText || '').trim();
+          if (bestText.length >= Math.max(20, assistantText.length * 0.3)) return best;
         }
-        return assistantMsg;
+
+        // 如果 markdown/最长 div 都不够长,直接用 assistant 消息容器本身
+        // 它一定包含完整回答(即使多了一点 "Worked for Xs" UI 文本)
+        if (assistantText.length > 0) return assistantMsg;
+        return q.assistantItem;
       }
       return q.assistantItem;
     }
@@ -74,7 +97,9 @@
     if (msgs.length) {
       const last = msgs[msgs.length - 1];
       const md = last.querySelector('.markdown, .prose, [class*="markdown"], [class*="MessageContent"]');
-      return md || last;
+      const mdText = md ? (md.innerText || '').trim() : '';
+      if (md && mdText.length > 0) return md;
+      return last;
     }
     const fallback = ['main [class*="markdown"]', 'main .prose', 'main'];
     for (const sel of fallback) {
@@ -92,7 +117,7 @@
     const cfg = { minChars: 1500, maxWait: 300000, ...config };
     const qa = findLastQA();
     if (tr) tr.push('findLastQA', qa ? { hasUser: !!qa.userItem, hasAssist: !!qa.assistantItem } : null);
-    const root = answerRoot(qa);
+    const root = answerRoot(qa, cfg);
     if (tr) tr.push('collect answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -117,7 +142,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: '[data-turn-id-container]',
+      qaSelector: cfg.answerSelector || '[data-turn-id-container]',
       domHtml: root.outerHTML,
       url: location.href,
       timedOut,
@@ -129,7 +154,7 @@
     const tr = G.makeTrace();
     tr.push('runChatgptTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
-      const box = await findInput();
+      const box = await findInput(config);
       if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
       tr.push('input found', { tag: box.tagName, id: box.id, editable: box.isContentEditable });
 
@@ -168,14 +193,14 @@
     try {
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
       const qa = findLastQA();
-      const root = answerRoot(qa);
+      const root = answerRoot(qa, config);
       const len = (root.innerText || '').trim().length;
       tr.push('answerRoot', { tag: root.tagName, cls: root.className, innerLen: len });
       if (len < 20) {
         return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
       }
       const out = await collect(config, false, tr);
-      out.keyword = inferKeyword();
+      out.keyword = inferKeyword(config);
       out.trace = tr.steps;
       return out;
     } catch (e) {
@@ -185,7 +210,9 @@
   };
 
   // 推断关键词：优先首条用户消息，退化到 document.title
-  function inferKeyword() {
+  function inferKeyword(config = {}) {
+    const configured = G.getConfiguredElement(config.questionSelector, { last: true, matcher: config.questionMatcher });
+    if (configured && configured.innerText?.trim().length > 1) return configured.innerText.trim().slice(0, 200);
     const user = document.querySelector('[data-message-author-role=user]');
     if (user && user.innerText && user.innerText.trim().length > 1) {
       return user.innerText.trim().slice(0, 200);

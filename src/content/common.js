@@ -43,6 +43,55 @@
     return false;
   }
 
+  function getConfiguredElement(selector, { last = false, matcher = null } = {}) {
+    let elements = [];
+    try {
+      if (selector && typeof selector === 'string') elements = [...document.querySelectorAll(selector)].filter((el) => el.offsetParent !== null);
+    } catch (e) {
+      log('无效的用户选择器', selector, e);
+    }
+    if (elements.length) {
+      if (last || matcher?.role === '回答结果' || matcher?.role === '用户提问') return elements[elements.length - 1];
+      if (matcher?.role === '输入框') return elements.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+      return elements[0];
+    }
+    if (!matcher?.tag) return null;
+    const candidates = [...document.querySelectorAll(matcher.tag)].filter((el) => el.offsetParent !== null);
+    const attrs = matcher.attributes || {};
+    const classes = matcher.classes || [];
+    const scored = candidates.map((el) => {
+      let score = 0;
+      for (const [name, value] of Object.entries(attrs)) if (el.getAttribute(name) === value) score += 8;
+      for (const name of classes) if (el.classList.contains(name)) score += 2;
+      return { el, score };
+    }).filter((item) => item.score > 0);
+    if (!scored.length) return null;
+    const bestScore = Math.max(...scored.map((item) => item.score));
+    const best = scored.filter((item) => item.score === bestScore).map((item) => item.el);
+    if (last || matcher.role === '回答结果' || matcher.role === '用户提问') return best[best.length - 1];
+    if (matcher.role === '输入框') return best.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+    return best[0];
+  }
+
+  function inspectConfiguredElement(selector, matcher = null) {
+    const info = {
+      selector: typeof selector === 'string' ? selector.slice(0, 180) : null,
+      matcher: matcher ? { tag: matcher.tag || null, classes: (matcher.classes || []).slice(0, 4), attributes: matcher.attributes || {} } : null,
+      exactVisible: 0,
+      fuzzyCandidates: 0,
+      selectorError: null,
+    };
+    try {
+      if (selector) info.exactVisible = [...document.querySelectorAll(selector)].filter((el) => el.offsetParent !== null).length;
+    } catch (e) {
+      info.selectorError = String(e?.message || e).slice(0, 160);
+    }
+    if (matcher?.tag) {
+      info.fuzzyCandidates = [...document.querySelectorAll(matcher.tag)].filter((el) => el.offsetParent !== null).length;
+    }
+    return info;
+  }
+
   // 等生成结束。三条独立的完成信号,任一命中立即返回,不做叠加等待:
   //   A) 曾经看到过 stop 按钮,现在消失了 → 强信号,立即采集
   //   B) 正文长度连续两次 poll(默认 3s)未变 → 视为写完
@@ -261,5 +310,5 @@
     }
   }
 
-  globalThis.GEO = { sleep, rand, isGenerating, waitAnswerComplete, humanType, extractCitations, findQANodeByAnchor, captureNode, log, makeTrace };
+  globalThis.GEO = { sleep, rand, isGenerating, getConfiguredElement, inspectConfiguredElement, waitAnswerComplete, humanType, extractCitations, findQANodeByAnchor, captureNode, log, makeTrace };
 })();

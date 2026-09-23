@@ -11,6 +11,70 @@ import { captureNodeViaCDP } from '../lib/screenshot-cdp.js';
 import { captureNodeViaLib } from '../lib/screenshot-node.js';
 
 const STATE_KEY = 'geo_state';
+const SELECTOR_OVERRIDES_KEY = 'geo_selector_overrides';
+const SELECTOR_SETUP_KEY = 'geo_selector_setup';
+
+async function getSelectorOverrides() {
+  const data = await chrome.storage.local.get(SELECTOR_OVERRIDES_KEY);
+  return data[SELECTOR_OVERRIDES_KEY] || {};
+}
+
+async function getPlatformConfig(platform, config = {}) {
+  const overrides = await getSelectorOverrides();
+  return { ...config, ...(overrides[platform] || {}) };
+}
+
+async function configureCurrentPageSelectors(enhanced = false) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url) return { ok: false, error: 'no_active_tab' };
+  const platform = Object.keys(PLATFORMS).find((key) => PLATFORMS[key].match.test(tab.url));
+  if (!platform) return { ok: false, error: 'unsupported_page' };
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/selector-picker.js'] });
+  const pick = async (tabId, mode) => {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId }, func: (pickerMode) => globalThis.startGEOSelectorPicker({ mode: pickerMode }), args: [mode],
+    });
+    return result;
+  };
+  let result;
+  if (enhanced) {
+    const inputConfig = await pick(tab.id, 'input');
+    if (!inputConfig) return { ok: false, cancelled: true };
+    const flowId = `selector_${Date.now()}`;
+    await chrome.tabs.update(tab.id, { url: PLATFORMS[platform].newConversationUrl, active: true });
+    await waitTabComplete(tab.id, 60000);
+    await sleep(1500);
+    await chrome.storage.session.set({ [SELECTOR_SETUP_KEY]: { flowId, platform, tabId: tab.id, inputConfig } });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/selector-picker.js'] });
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (report) => { globalThis.startGEOSelectorPicker({ mode: 'response', report }); return true; },
+      args: [{ type: 'SELECTOR_RESPONSE_PICKED', flowId }],
+    });
+    return { ok: true, pending: true, platform };
+  } else {
+    result = await pick(tab.id, 'all');
+    if (!result) return { ok: false, cancelled: true };
+  }
+  const overrides = await getSelectorOverrides();
+  overrides[platform] = { ...result, savedAt: Date.now() };
+  await chrome.storage.local.set({ [SELECTOR_OVERRIDES_KEY]: overrides });
+  chrome.runtime.sendMessage({ type: 'SELECTOR_CONFIG_UPDATE', platform, config: overrides[platform] }).catch(() => {});
+  return { ok: true, platform, config: overrides[platform] };
+}
+
+async function finishEnhancedSelectorSetup(flowId, responseConfig) {
+  const data = await chrome.storage.session.get(SELECTOR_SETUP_KEY);
+  const setup = data[SELECTOR_SETUP_KEY];
+  if (!setup || setup.flowId !== flowId) return { ok: false, error: 'setup_not_found' };
+  await chrome.storage.session.remove(SELECTOR_SETUP_KEY);
+  if (!responseConfig) return { ok: false, cancelled: true };
+  const overrides = await getSelectorOverrides();
+  overrides[setup.platform] = { ...setup.inputConfig, ...responseConfig, savedAt: Date.now() };
+  await chrome.storage.local.set({ [SELECTOR_OVERRIDES_KEY]: overrides });
+  chrome.runtime.sendMessage({ type: 'SELECTOR_CONFIG_UPDATE', platform: setup.platform, config: overrides[setup.platform] }).catch(() => {});
+  return { ok: true, platform: setup.platform };
+}
 
 // 把 HTML 正文里的 <img> 替换成 alt 占位文本,避免导出/渲染时图片喧宾夺主。
 // 截图走独立的 DOM/图片流程,不受影响。
@@ -85,6 +149,11 @@ function logResult(tag, result) {
   }
 }
 
+function errorTrace(stage, error) {
+  const e = error || {};
+  return [`${stage}: ${e.name || 'Error'}: ${String(e.message || e).slice(0, 500)}`, ...(e.stack ? [String(e.stack).slice(0, 1200)] : [])];
+}
+
 // 确保存在一个「活动会话」（抽屉）；没有或已删就新建一个默认抽屉。
 // 采集结果都归入活动会话。返回活动会话 id。
 async function ensureActiveSession() {
@@ -124,6 +193,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'COLLECT_CURRENT':
         sendResponse({ ok: true });
         collectCurrentPage(); // 采集当前活动标签页，追加到结果
+        break;
+      case 'CONFIGURE_CURRENT_SELECTORS':
+        configureCurrentPageSelectors(!!msg.enhanced).then(sendResponse).catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+        break;
+      case 'GET_SELECTOR_OVERRIDES':
+        sendResponse(await getSelectorOverrides());
+        break;
+      case 'CLEAR_SELECTOR_OVERRIDE': {
+        const overrides = await getSelectorOverrides();
+        delete overrides[msg.platform];
+        await chrome.storage.local.set({ [SELECTOR_OVERRIDES_KEY]: overrides });
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'SELECTOR_RESPONSE_PICKED':
+        sendResponse(await finishEnhancedSelectorSetup(msg.flowId, msg.result));
         break;
       case 'STOP': {
         const s = await getState();
@@ -207,7 +292,7 @@ async function runOneTask(task) {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (entryName, query, config) => globalThis[entryName](query, config),
-      args: [cfg.entry, task.keyword, cfg.config || {}],
+      args: [cfg.entry, task.keyword, await getPlatformConfig(task.platform, cfg.config || {})],
     });
 
     const out = sanitizeResultHtml(result) || { status: 'failed', error: 'no_result' };
@@ -219,7 +304,7 @@ async function runOneTask(task) {
 
     return out;
   } catch (e) {
-    return { status: 'failed', error: String(e && e.message || e) };
+    return { status: 'failed', error: String(e && e.message || e), trace: errorTrace('runOneTask exception', e) };
   }
 }
 
@@ -295,7 +380,7 @@ async function collectCurrentPage() {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (entryName, config) => globalThis[entryName](config),
-      args: [cfg.collectEntry, cfg.config || {}],
+      args: [cfg.collectEntry, await getPlatformConfig(platform, cfg.config || {})],
     });
 
     const out = sanitizeResultHtml(result) || { status: 'failed', error: 'no_result' };
@@ -310,7 +395,7 @@ async function collectCurrentPage() {
     await pushCollectResult({ sessionId, runId, ...out });
   } catch (e) {
     console.warn('[GEO] 采集当前页异常:', e);
-    await pushCollectResult({ sessionId, status: 'failed', error: String(e && e.message || e) });
+    await pushCollectResult({ sessionId, status: 'failed', error: String(e && e.message || e), trace: errorTrace('collectCurrentPage exception', e) });
   } finally {
     stopKeepAlive();
   }

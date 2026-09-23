@@ -19,6 +19,10 @@ const els = {
   collectBtn: $('collect-btn'),
   exportBtn: $('export-btn'),
   newSessionBtn: $('new-session-btn'),
+  configureElementsBtn: $('configure-elements-btn'),
+  configureEnhancedBtn: $('configure-enhanced-btn'),
+  selectorConfigStatus: $('selector-config-status'),
+  selectorConfigList: $('selector-config-list'),
   sessions: $('sessions'),
   progressSection: $('progress-section'),
   progressLabel: $('progress-label'),
@@ -68,6 +72,27 @@ function selectedPlatforms() {
 
 function send(msg) {
   return chrome.runtime.sendMessage(msg);
+}
+
+const platformNames = { perplexity: 'Perplexity', chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', doubao: '豆包', yuanbao: '元宝', kimi: 'Kimi' };
+
+async function renderSelectorConfigs() {
+  const configs = await send({ type: 'GET_SELECTOR_OVERRIDES' });
+  const entries = Object.entries(configs || {});
+  els.selectorConfigList.innerHTML = '';
+  els.selectorConfigStatus.textContent = entries.length ? '已保存的规则会在该平台后续采集时自动生效。' : '未配置时使用内置适配规则。';
+  for (const [platform, config] of entries) {
+    const row = document.createElement('div');
+    row.className = 'selector-config-item';
+    const text = document.createElement('span');
+    text.textContent = `${platformNames[platform] || platform}：输入、提问、回答已配置`;
+    text.title = `输入框：${config.inputSelector}\n用户提问：${config.questionSelector}\n回答结果：${config.answerSelector}`;
+    const clear = document.createElement('button');
+    clear.className = 'link-btn'; clear.textContent = '恢复内置';
+    clear.addEventListener('click', async () => { await send({ type: 'CLEAR_SELECTOR_OVERRIDE', platform }); renderSelectorConfigs(); });
+    row.append(text, clear);
+    els.selectorConfigList.appendChild(row);
+  }
 }
 
 function fmtTime(ts) {
@@ -290,6 +315,25 @@ els.collectBtn.addEventListener('click', async () => {
   setTimeout(() => { els.collectBtn.textContent = original; els.collectBtn.disabled = false; }, 2500);
 });
 
+async function configureElements(enhanced = false) {
+  const button = enhanced ? els.configureEnhancedBtn : els.configureElementsBtn;
+  button.disabled = true;
+  button.textContent = enhanced ? '请在页面操作…' : '请在页面点选…';
+  try {
+    const result = await send({ type: 'CONFIGURE_CURRENT_SELECTORS', enhanced });
+    if (!result.ok && !result.cancelled) alert(result.error === 'unsupported_page' ? '当前页面不是已支持的平台。' : `配置失败：${result.error || '未知错误'}`);
+    await renderSelectorConfigs();
+  } catch (e) {
+    alert('配置失败：' + (e?.message || e));
+  } finally {
+    button.textContent = enhanced ? '增强配置' : '快速配置';
+    button.disabled = false;
+  }
+}
+
+els.configureElementsBtn.addEventListener('click', () => configureElements(false));
+els.configureEnhancedBtn.addEventListener('click', () => configureElements(true));
+
 els.exportBtn.addEventListener('click', async () => {
   els.exportBtn.disabled = true;
   const original = els.exportBtn.textContent;
@@ -316,6 +360,7 @@ els.newSessionBtn.addEventListener('click', async () => {
 // 接收 SW 主动推送的状态更新
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'STATE_UPDATE') { render(msg.state); renderSessions(); }
+  if (msg.type === 'SELECTOR_CONFIG_UPDATE') renderSelectorConfigs();
 });
 
 function render(state) {
@@ -331,6 +376,8 @@ function render(state) {
   els.collectBtn.disabled = running;
   els.exportBtn.disabled = running;
   els.newSessionBtn.disabled = running;
+  els.configureElementsBtn.disabled = running;
+  els.configureEnhancedBtn.disabled = running;
 
   els.progressCount.textContent = `${finished} / ${total}`;
   els.progressFill.style.width = total ? `${(finished / total) * 100}%` : '0';
@@ -370,6 +417,7 @@ function render(state) {
 loadFormState();
 send({ type: 'GET_STATE' }).then(render).catch(() => {});
 renderSessions();
+renderSelectorConfigs();
 
 // 表单变化时自动持久化
 els.keywords.addEventListener('input', saveFormState);

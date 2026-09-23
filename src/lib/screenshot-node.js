@@ -1,9 +1,9 @@
 // screenshot-lib.js — 用页面内注入的 html-to-image 截 DOM 节点
 // 优势:节点独立渲染,不受父容器 overflow / fixed / sticky 干扰,一次出图无拼接
-// 依赖:src/lib/html-to-image.min.js(UMD,20KB)+ src/content/common.js 的 captureNode
+// 依赖:src/lib/html-to-image.min.js(UMD,20KB)。common.js 已由 SW 在调用前注入,
+//      所以这里只补充 html-to-image 库本身。
 
 const LIB_FILE = 'src/lib/html-to-image.min.js';
-const COMMON_FILE = 'src/content/common.js';
 
 function dataUrlToBlob(dataUrl) {
   const [head, b64] = dataUrl.split(',');
@@ -23,10 +23,10 @@ function dataUrlToBlob(dataUrl) {
 export async function captureNodeViaLib(tabId, selector) {
   if (!selector) return null;
   try {
-    // 1) 注入 html-to-image + common(带 captureNode)。二者都做了幂等保护(重复注入不出错)
+    // 1) 注入 html-to-image 库。common.js 已由 SW 提前注入并挂载 GEO.captureNode。
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: [LIB_FILE, COMMON_FILE],
+      files: [LIB_FILE],
     });
 
     // 2) 调用 GEO.captureNode(selector) → { dataUrl } 或 { error }

@@ -15,9 +15,11 @@
 (function () {
   const G = globalThis.GEO;
 
-  async function findInput() {
+  async function findInput(config = {}) {
     const selectors = ['.ql-editor', 'div[contenteditable=true][data-prevent-quill-blur]', 'div[contenteditable=true]'];
     for (let attempt = 0; attempt < 20; attempt++) {
+      const configured = G.getConfiguredElement(config.inputSelector, { matcher: config.inputMatcher });
+      if (configured) return configured;
       for (const sel of selectors) {
         const el = document.querySelector(sel);
         if (el && el.offsetParent !== null) return el;
@@ -77,7 +79,9 @@
     return { userItem, assistantItem, qaAncestor };
   }
 
-  function answerRoot(qa) {
+  function answerRoot(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+    if (configured) return configured;
     const q = qa || findLastQA();
     if (!q || !q.assistantItem) return document.body;
 
@@ -118,7 +122,7 @@
     const cfg = { minChars: 400, maxWait: 240000, ...config };
     const qa = findLastQA();
     if (tr) tr.push('findLastQA', qa ? { user: !!qa.userItem, assistant: !!qa.assistantItem } : null);
-    const root = answerRoot(qa);
+    const root = answerRoot(qa, cfg);
     if (tr) tr.push('answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -145,7 +149,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: '.agent-chat__list__item__content',
+      qaSelector: cfg.answerSelector || '.agent-chat__list__item__content',
       url: location.href,
       timedOut,
     };
@@ -155,7 +159,7 @@
     const tr = G.makeTrace();
     tr.push('runYuanbaoTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
-      const box = await findInput();
+      const box = await findInput(config);
       if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
       tr.push('input found', { cls: String(box.className).slice(0, 60) });
 
@@ -192,11 +196,12 @@
     try {
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
       const qa = findLastQA();
-      if (!qa || !qa.assistantItem) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
-      const len = (qa.assistantItem.innerText || '').trim().length;
+      const configuredAnswer = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+      if ((!qa || !qa.assistantItem) && !configuredAnswer) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
+      const len = ((configuredAnswer || qa.assistantItem).innerText || '').trim().length;
       if (len < 20) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
       const out = await collect(config, false, tr);
-      out.keyword = inferKeyword(qa);
+      out.keyword = inferKeyword(qa, config);
       out.trace = tr.steps;
       return out;
     } catch (e) {
@@ -205,7 +210,9 @@
     }
   };
 
-  function inferKeyword(qa) {
+  function inferKeyword(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.questionSelector, { last: true, matcher: config.questionMatcher });
+    if (configured && configured.innerText?.trim().length > 1) return configured.innerText.trim().slice(0, 200);
     const q = qa || findLastQA();
     if (q && q.userItem) {
       const bubble = q.userItem.querySelector('.agent-chat__bubble--human') || q.userItem;

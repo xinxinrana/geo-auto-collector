@@ -15,9 +15,11 @@
 (function () {
   const G = globalThis.GEO;
 
-  async function findInput() {
+  async function findInput(config = {}) {
     const selectors = ['textarea.semi-input-textarea', 'textarea', 'div[contenteditable=true]'];
     for (let attempt = 0; attempt < 20; attempt++) {
+      const configured = G.getConfiguredElement(config.inputSelector, { matcher: config.inputMatcher });
+      if (configured) return configured;
       for (const sel of selectors) {
         // 多个 textarea 时取输入区那个:排除隐藏 + 排除位置太靠顶
         const list = [...document.querySelectorAll(sel)].filter((e) => e.offsetParent !== null);
@@ -92,9 +94,16 @@
     return { userItem, assistantItem, qaAncestor: list || assistantItem.parentElement };
   }
 
-  function answerRoot(qa) {
+  function answerRoot(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+    if (configured) return configured;
     const q = qa || findLastQA();
-    if (!q || !q.assistantItem) return document.body;
+    if (!q || !q.assistantItem) {
+      // 豆包改版后虚拟列表标识可能消失；保留回答正文的语义容器作为兜底。
+      const candidates = [...document.querySelectorAll('.md-box-root, [class*="markdown"], [class*="message-content"], [class*="answer-content"]')]
+        .filter((el) => el.offsetParent !== null && (el.innerText || '').trim().length >= 20);
+      return candidates[candidates.length - 1] || document.body;
+    }
     const md = q.assistantItem.querySelector('.md-box-root, [class*=markdown]');
     return md || q.assistantItem;
   }
@@ -150,7 +159,7 @@
     const cfg = { minChars: 400, maxWait: 240000, ...config };
     const qa = findLastQA();
     if (tr) tr.push('findLastQA', qa ? { user: !!qa.userItem, assistant: !!qa.assistantItem } : null);
-    const root = answerRoot(qa);
+    const root = answerRoot(qa, cfg);
     if (tr) tr.push('answerRoot', { tag: root.tagName, innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -180,7 +189,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: shotSelector || '.list_items',
+      qaSelector: cfg.answerSelector || shotSelector || '.list_items',
       url: location.href,
       timedOut,
     };
@@ -190,8 +199,11 @@
     const tr = G.makeTrace();
     tr.push('runDoubaoTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
-      const box = await findInput();
-      if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
+      const box = await findInput(config);
+      if (!box) {
+        tr.push('input_not_found', G.inspectConfiguredElement(config.inputSelector, config.inputMatcher));
+        return { status: 'failed', error: 'input_not_found', trace: tr.steps };
+      }
       tr.push('input found', { tag: box.tagName });
 
       await typeReact(box, query);
@@ -226,11 +238,17 @@
     try {
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
       const qa = findLastQA();
-      if (!qa || !qa.assistantItem) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
-      const len = (qa.assistantItem.innerText || '').trim().length;
-      if (len < 20) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
+      tr.push('answer selector', G.inspectConfiguredElement(config.answerSelector, config.answerMatcher));
+      const configuredAnswer = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+      const root = configuredAnswer || answerRoot(qa, config);
+      const len = (root.innerText || '').trim().length;
+      tr.push('answer check', { configured: !!configuredAnswer, qaFound: !!qa?.assistantItem, tag: root.tagName, chars: len });
+      if (len < 20) {
+        tr.push('no_answer_on_page', { url: location.href, minChars: 20, detectedChars: len, fallbackUsed: !configuredAnswer && !qa?.assistantItem });
+        return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
+      }
       const out = await collect(config, false, tr);
-      out.keyword = inferKeyword(qa);
+      out.keyword = inferKeyword(qa, config);
       out.trace = tr.steps;
       return out;
     } catch (e) {
@@ -239,7 +257,9 @@
     }
   };
 
-  function inferKeyword(qa) {
+  function inferKeyword(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.questionSelector, { last: true, matcher: config.questionMatcher });
+    if (configured && configured.innerText?.trim().length > 1) return configured.innerText.trim().slice(0, 200);
     const q = qa || findLastQA();
     if (q && q.userItem) {
       const bubble = q.userItem.querySelector('.bg-g-send-msg-bubble-bg') || q.userItem.querySelector('.md-box-root') || q.userItem;

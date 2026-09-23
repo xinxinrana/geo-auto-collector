@@ -14,13 +14,15 @@
 (function () {
   const G = globalThis.GEO;
 
-  async function findInput() {
+  async function findInput(config = {}) {
     const selectors = [
       'div[contenteditable=true][data-lexical-editor=true]',
       'div[contenteditable=true]',
       'textarea',
     ];
     for (let attempt = 0; attempt < 20; attempt++) {
+      const configured = G.getConfiguredElement(config.inputSelector, { matcher: config.inputMatcher });
+      if (configured) return configured;
       for (const sel of selectors) {
         const el = document.querySelector(sel);
         if (el && el.offsetParent !== null) return el;
@@ -60,7 +62,9 @@
     return { userItem, assistantItem, qaAncestor: list };
   }
 
-  function answerRoot(qa) {
+  function answerRoot(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+    if (configured) return configured;
     const q = qa || findLastQA();
     if (!q || !q.assistantItem) return document.body;
     // 优先 markdown / 内容容器类
@@ -129,7 +133,7 @@
     const cfg = { minChars: 400, maxWait: 240000, ...config };
     const qa = findLastQA();
     if (tr) tr.push('findLastQA', qa ? { user: !!qa.userItem, assistant: !!qa.assistantItem, ancestor: qa.qaAncestor.className.slice(0, 40) } : null);
-    const root = answerRoot(qa);
+    const root = answerRoot(qa, cfg);
     if (tr) tr.push('answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -161,7 +165,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: shotSelector || '.chat-content-list',
+      qaSelector: cfg.answerSelector || shotSelector || '.chat-content-list',
       url: location.href,
       timedOut,
     };
@@ -171,7 +175,7 @@
     const tr = G.makeTrace();
     tr.push('runKimiTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
-      const box = await findInput();
+      const box = await findInput(config);
       if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
       tr.push('input found', { tag: box.tagName, editable: box.isContentEditable });
 
@@ -207,16 +211,17 @@
     try {
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
       const qa = findLastQA();
-      if (!qa || !qa.assistantItem) {
+      const configuredAnswer = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+      if ((!qa || !qa.assistantItem) && !configuredAnswer) {
         tr.push('no_qa');
         return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
       }
-      const len = (qa.assistantItem.innerText || '').trim().length;
-      tr.push('qa found', { userLen: qa.userItem ? qa.userItem.innerText.length : 0, assistLen: len });
+      const len = ((configuredAnswer || qa.assistantItem).innerText || '').trim().length;
+      tr.push('qa found', { userLen: qa?.userItem ? qa.userItem.innerText.length : 0, assistLen: len });
       if (len < 20) return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
 
       const out = await collect(config, false, tr);
-      out.keyword = inferKeyword(qa);
+      out.keyword = inferKeyword(qa, config);
       out.trace = tr.steps;
       return out;
     } catch (e) {
@@ -225,7 +230,9 @@
     }
   };
 
-  function inferKeyword(qa) {
+  function inferKeyword(qa, config = {}) {
+    const configured = G.getConfiguredElement(config.questionSelector, { last: true, matcher: config.questionMatcher });
+    if (configured && configured.innerText?.trim().length > 1) return configured.innerText.trim().slice(0, 200);
     const q = qa || findLastQA();
     if (q && q.userItem) {
       const t = (q.userItem.querySelector('.user-content') || q.userItem).innerText.trim();
@@ -235,9 +242,4 @@
     return title || '当前页面';
   }
 
-  // 暴露给 SW 用于 DOM 截图定位
-  globalThis.geoGetQANodeSelector = globalThis.geoGetQANodeSelector || function () {
-    const qa = findLastQA();
-    return qa ? { platform: 'kimi', selector: '.chat-content-list' } : null;
-  };
 })();

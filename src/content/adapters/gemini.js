@@ -7,9 +7,11 @@
 (function () {
   const G = globalThis.GEO;
 
-  async function findInput() {
+  async function findInput(config = {}) {
     const selectors = ['div.ql-editor[contenteditable=true]', 'rich-textarea div[contenteditable=true]', 'div[contenteditable=true]', 'textarea'];
     for (let attempt = 0; attempt < 20; attempt++) {
+      const configured = G.getConfiguredElement(config.inputSelector, { matcher: config.inputMatcher });
+      if (configured) return configured;
       for (const sel of selectors) {
         const el = document.querySelector(sel);
         if (el && el.offsetParent !== null) return el;
@@ -32,7 +34,9 @@
   // 最后一条模型回复作为正文容器。
   // 注意：querySelectorAll 用逗号组合会按“文档顺序”返回，不能用来表达优先级；
   // 这里按选择器优先级逐个尝试，取最后一个匹配到、且有实际文本的元素。
-  function answerRoot() {
+  function answerRoot(config = {}) {
+    const configured = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+    if (configured) return configured;
     // 每种“回答容器”选择器，优先级从高到低
     const containerSels = ['message-content', 'model-response', '.model-response-text', '.response-content'];
     for (const sel of containerSels) {
@@ -73,7 +77,7 @@
     const cfg = { minChars: 1000, maxWait: 240000, ...config };
     const qa = findLastQA();
     if (tr) tr.push('findLastQA', qa ? { hasUser: !!qa.userItem, hasAssist: !!qa.assistantItem } : null);
-    const root = answerRoot();
+    const root = answerRoot(cfg);
     if (tr) tr.push('collect answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -110,7 +114,7 @@
       answerChars: text.length,
       citations,
       qaHtml: qa ? qa.qaAncestor.outerHTML.slice(0, 200000) : null,
-      qaSelector: '.conversation-container',
+      qaSelector: cfg.answerSelector || '.conversation-container',
       domHtml: root.outerHTML,
       url: location.href,
       timedOut,
@@ -122,7 +126,7 @@
     const tr = G.makeTrace();
     tr.push('runGeminiTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
-      const box = await findInput();
+      const box = await findInput(config);
       if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
       tr.push('input found', { tag: box.tagName, cls: String(box.className).slice(0, 60), editable: box.isContentEditable });
 
@@ -160,14 +164,14 @@
     tr.push('collectGeminiPage start', { url: location.href });
     try {
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
-      const root = answerRoot();
+      const root = answerRoot(config);
       const len = (root.innerText || '').trim().length;
       tr.push('answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: len });
       if (len < 20) {
         return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
       }
       const out = await collect(config, false, tr);
-      out.keyword = inferKeyword();
+      out.keyword = inferKeyword(config);
       out.trace = tr.steps;
       return out;
     } catch (e) {
@@ -178,7 +182,9 @@
 
   // 推断关键词：优先首条用户提问。
   // Gemini 的 .query-text-line 是纯提问文本；.query-text/user-query 会带 “你说” 前缀，需剥离。
-  function inferKeyword() {
+  function inferKeyword(config = {}) {
+    const configured = G.getConfiguredElement(config.questionSelector, { last: true, matcher: config.questionMatcher });
+    if (configured && configured.innerText?.trim().length > 1) return configured.innerText.trim().slice(0, 200);
     const line = document.querySelector('.query-text-line');
     if (line && (line.innerText || '').trim().length > 1) return line.innerText.trim().slice(0, 200);
 

@@ -7,9 +7,11 @@
 (function () {
   const G = globalThis.GEO;
 
-  async function findInput() {
+  async function findInput(config = {}) {
     const selectors = ['div[contenteditable=true].ProseMirror', 'div[contenteditable=true]', 'fieldset div[contenteditable=true]', 'textarea'];
     for (let attempt = 0; attempt < 20; attempt++) {
+      const configured = G.getConfiguredElement(config.inputSelector, { matcher: config.inputMatcher });
+      if (configured) return configured;
       for (const sel of selectors) {
         const el = document.querySelector(sel);
         if (el && el.offsetParent !== null) return el;
@@ -20,7 +22,9 @@
   }
 
   // 最后一条 Claude 回复作为正文容器
-  function answerRoot() {
+  function answerRoot(config = {}) {
+    const configured = G.getConfiguredElement(config.answerSelector, { last: true, matcher: config.answerMatcher });
+    if (configured) return configured;
     const msgs = [...document.querySelectorAll('[data-testid=assistant-message], div[class*="font-claude"], .prose')];
     if (msgs.length) {
       const last = msgs[msgs.length - 1];
@@ -41,7 +45,7 @@
 
   async function collect(config = {}, ensureComplete = true, tr = null) {
     const cfg = { minChars: 1200, maxWait: 240000, ...config };
-    const root = answerRoot();
+    const root = answerRoot(cfg);
     if (tr) tr.push('collect answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: (root.innerText || '').length });
 
     let text, timedOut = false;
@@ -75,6 +79,7 @@
       answerHtml: root.innerHTML,
       answerChars: text.length,
       citations,
+      qaSelector: cfg.answerSelector || null,
       domHtml: root.outerHTML,
       url: location.href,
       timedOut,
@@ -86,7 +91,7 @@
     const tr = G.makeTrace();
     tr.push('runClaudeTask start', { url: location.href, query: String(query).slice(0, 60) });
     try {
-      const box = await findInput();
+      const box = await findInput(config);
       if (!box) { tr.push('input_not_found'); return { status: 'failed', error: 'input_not_found', trace: tr.steps }; }
       tr.push('input found', { tag: box.tagName, cls: String(box.className).slice(0, 60), editable: box.isContentEditable });
 
@@ -123,14 +128,14 @@
     tr.push('collectClaudePage start', { url: location.href });
     try {
       if (loginRequired()) { tr.push('login_required'); return { status: 'login_required', trace: tr.steps }; }
-      const root = answerRoot();
+      const root = answerRoot(config);
       const len = (root.innerText || '').trim().length;
       tr.push('answerRoot', { tag: root.tagName, cls: String(root.className).slice(0, 60), innerLen: len });
       if (len < 20) {
         return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
       }
       const out = await collect(config, false, tr);
-      out.keyword = inferKeyword();
+      out.keyword = inferKeyword(config);
       out.trace = tr.steps;
       return out;
     } catch (e) {
@@ -140,7 +145,9 @@
   };
 
   // 推断关键词：优先首条用户消息，退化到 document.title
-  function inferKeyword() {
+  function inferKeyword(config = {}) {
+    const configured = G.getConfiguredElement(config.questionSelector, { last: true, matcher: config.questionMatcher });
+    if (configured && configured.innerText?.trim().length > 1) return configured.innerText.trim().slice(0, 200);
     const user = document.querySelector('[data-testid=user-message]');
     if (user && user.innerText && user.innerText.trim().length > 1) {
       return user.innerText.trim().slice(0, 200);
