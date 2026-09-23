@@ -19,10 +19,7 @@ const els = {
   collectBtn: $('collect-btn'),
   exportBtn: $('export-btn'),
   newSessionBtn: $('new-session-btn'),
-  configureElementsBtn: $('configure-elements-btn'),
-  configureEnhancedBtn: $('configure-enhanced-btn'),
-  selectorConfigStatus: $('selector-config-status'),
-  selectorConfigList: $('selector-config-list'),
+  openConsoleBtn: $('open-console-btn'),
   sessions: $('sessions'),
   progressSection: $('progress-section'),
   progressLabel: $('progress-label'),
@@ -74,25 +71,22 @@ function send(msg) {
   return chrome.runtime.sendMessage(msg);
 }
 
-const platformNames = { perplexity: 'Perplexity', chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', doubao: '豆包', yuanbao: '元宝', kimi: 'Kimi' };
-
-async function renderSelectorConfigs() {
-  const configs = await send({ type: 'GET_SELECTOR_OVERRIDES' });
-  const entries = Object.entries(configs || {});
-  els.selectorConfigList.innerHTML = '';
-  els.selectorConfigStatus.textContent = entries.length ? '已保存的规则会在该平台后续采集时自动生效。' : '未配置时使用内置适配规则。';
-  for (const [platform, config] of entries) {
-    const row = document.createElement('div');
-    row.className = 'selector-config-item';
-    const text = document.createElement('span');
-    text.textContent = `${platformNames[platform] || platform}：输入、提问、回答已配置`;
-    text.title = `输入框：${config.inputSelector}\n用户提问：${config.questionSelector}\n回答结果：${config.answerSelector}`;
-    const clear = document.createElement('button');
-    clear.className = 'link-btn'; clear.textContent = '恢复内置';
-    clear.addEventListener('click', async () => { await send({ type: 'CLEAR_SELECTOR_OVERRIDE', platform }); renderSelectorConfigs(); });
-    row.append(text, clear);
-    els.selectorConfigList.appendChild(row);
+async function loadPlatformCatalog() {
+  const catalog = await send({ type: 'GET_PLATFORM_CATALOG' });
+  els.platforms.querySelectorAll('[data-custom-platform]').forEach((label) => label.remove());
+  for (const item of catalog.filter((entry) => entry.custom)) {
+    const label = document.createElement('label');
+    label.className = 'platform';
+    label.dataset.customPlatform = item.key;
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = item.key;
+    label.append(input, document.createTextNode(` ${item.name}`));
+    els.platforms.append(label);
   }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const active = catalog.find((item) => { try { return new URL(item.url).hostname === new URL(tab?.url).hostname; } catch { return false; } });
+  if (active) await send({ type: 'SET_CONSOLE_PLATFORM', platform: active.key });
 }
 
 function fmtTime(ts) {
@@ -296,7 +290,8 @@ els.startBtn.addEventListener('click', async () => {
   if (!keywords.length) return alert('请输入至少一个关键词');
   if (!platforms.length) return alert('请选择至少一个平台');
   await ensureActiveSession(); // 保证有抽屉接住结果
-  await send({ type: 'START', keywords, platforms });
+  const result = await send({ type: 'START', keywords, platforms });
+  if (!result?.ok) alert(result?.error === 'task_running' ? '已有采集或试运行任务正在进行。' : `启动失败：${result?.error || '未知错误'}`);
 });
 
 els.stopBtn.addEventListener('click', () => send({ type: 'STOP' }));
@@ -315,24 +310,16 @@ els.collectBtn.addEventListener('click', async () => {
   setTimeout(() => { els.collectBtn.textContent = original; els.collectBtn.disabled = false; }, 2500);
 });
 
-async function configureElements(enhanced = false) {
-  const button = enhanced ? els.configureEnhancedBtn : els.configureElementsBtn;
-  button.disabled = true;
-  button.textContent = enhanced ? '请在页面操作…' : '请在页面点选…';
+els.openConsoleBtn.addEventListener('click', async () => {
   try {
-    const result = await send({ type: 'CONFIGURE_CURRENT_SELECTORS', enhanced });
-    if (!result.ok && !result.cancelled) alert(result.error === 'unsupported_page' ? '当前页面不是已支持的平台。' : `配置失败：${result.error || '未知错误'}`);
-    await renderSelectorConfigs();
-  } catch (e) {
-    alert('配置失败：' + (e?.message || e));
-  } finally {
-    button.textContent = enhanced ? '增强配置' : '快速配置';
-    button.disabled = false;
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    await chrome.sidePanel.open({ windowId: tab.windowId });
+    window.close();
+  } catch (error) {
+    await chrome.tabs.create({ url: chrome.runtime.getURL('src/console/console.html') });
+    window.close();
   }
-}
-
-els.configureElementsBtn.addEventListener('click', () => configureElements(false));
-els.configureEnhancedBtn.addEventListener('click', () => configureElements(true));
+});
 
 els.exportBtn.addEventListener('click', async () => {
   els.exportBtn.disabled = true;
@@ -360,7 +347,7 @@ els.newSessionBtn.addEventListener('click', async () => {
 // 接收 SW 主动推送的状态更新
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'STATE_UPDATE') { render(msg.state); renderSessions(); }
-  if (msg.type === 'SELECTOR_CONFIG_UPDATE') renderSelectorConfigs();
+  if (msg.type === 'SELECTOR_CONFIG_UPDATE') loadPlatformCatalog().catch(() => {});
 });
 
 function render(state) {
@@ -376,8 +363,6 @@ function render(state) {
   els.collectBtn.disabled = running;
   els.exportBtn.disabled = running;
   els.newSessionBtn.disabled = running;
-  els.configureElementsBtn.disabled = running;
-  els.configureEnhancedBtn.disabled = running;
 
   els.progressCount.textContent = `${finished} / ${total}`;
   els.progressFill.style.width = total ? `${(finished / total) * 100}%` : '0';
@@ -414,10 +399,10 @@ function render(state) {
 }
 
 // 打开时：恢复表单状态、拉取当前状态、渲染会话
-loadFormState();
+loadPlatformCatalog().then(loadFormState).catch(() => loadFormState());
+$('version').textContent = `v${chrome.runtime.getManifest().version}`;
 send({ type: 'GET_STATE' }).then(render).catch(() => {});
 renderSessions();
-renderSelectorConfigs();
 
 // 表单变化时自动持久化
 els.keywords.addEventListener('input', saveFormState);

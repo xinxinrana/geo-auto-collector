@@ -206,11 +206,18 @@
       }
       tr.push('input found', { tag: box.tagName });
 
-      await typeReact(box, query);
-      tr.push('typed (react setter)');
+      if (/^(INPUT|TEXTAREA)$/.test(box.tagName)) {
+        await typeReact(box, query);
+        tr.push('typed (react setter)');
+      } else if (box.isContentEditable) {
+        await G.humanType(box, query);
+        tr.push('typed (contenteditable)');
+      } else {
+        return { status: 'failed', error: 'input_not_editable', trace: tr.steps };
+      }
       await G.sleep(G.rand(600, 1000));
 
-      const sendBtn = findSendButton();
+      const sendBtn = G.getConfiguredElement(config.sendSelector, { matcher: config.sendMatcher }) || findSendButton();
       if (sendBtn) {
         sendBtn.click();
         tr.push('sent via send-msg-btn');
@@ -243,8 +250,9 @@
       const root = configuredAnswer || answerRoot(qa, config);
       const len = (root.innerText || '').trim().length;
       tr.push('answer check', { configured: !!configuredAnswer, qaFound: !!qa?.assistantItem, tag: root.tagName, chars: len });
-      if (len < 20) {
-        tr.push('no_answer_on_page', { url: location.href, minChars: 20, detectedChars: len, fallbackUsed: !configuredAnswer && !qa?.assistantItem });
+      const minChars = configuredAnswer ? 2 : 20;
+      if (len < minChars) {
+        tr.push('no_answer_on_page', { url: location.href, minChars, detectedChars: len, fallbackUsed: !configuredAnswer && !qa?.assistantItem });
         return { status: 'failed', error: 'no_answer_on_page', trace: tr.steps };
       }
       const out = await collect(config, false, tr);

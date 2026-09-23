@@ -99,7 +99,7 @@
       tr.push('typed');
       await G.sleep(G.rand(300, 600));
 
-      const sendBtn = document.querySelector('button[aria-label*="Send" i], button[aria-label*="发送"], [data-testid=send-button]');
+      const sendBtn = G.getConfiguredElement(config.sendSelector, { matcher: config.sendMatcher }) || document.querySelector('button[aria-label*="Send" i], button[aria-label*="发送"], [data-testid=send-button]');
       if (sendBtn && !sendBtn.disabled && sendBtn.offsetParent !== null) {
         sendBtn.click();
         tr.push('sent via button');

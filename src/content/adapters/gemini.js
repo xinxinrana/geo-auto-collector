@@ -135,7 +135,7 @@
       await G.sleep(G.rand(400, 800));
 
       // 优先点发送按钮，退化到 Enter
-      const sendBtn = document.querySelector('button[aria-label*="Send" i], button[aria-label*="发送"], button.send-button, [data-testid=send-button]');
+      const sendBtn = G.getConfiguredElement(config.sendSelector, { matcher: config.sendMatcher }) || document.querySelector('button[aria-label*="Send" i], button[aria-label*="发送"], button.send-button, [data-testid=send-button]');
       if (sendBtn && !sendBtn.disabled && sendBtn.offsetParent !== null) {
         sendBtn.click();
         tr.push('sent via button');

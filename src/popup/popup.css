@@ -197,13 +197,7 @@ button.danger { background: #fff; color: #dc2626; border-color: #fca5a5; }
 .muted { color: #9ca3af; font-size: 12px; }
 .muted.small { padding: 4px 0; }
 
-.selector-config-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-.selector-config-head label { margin: 0; }
-.selector-config-actions { display: flex; gap: 4px; }
-.selector-config-actions .mini { padding: 3px 6px; }
-#selector-config-status { margin-bottom: 5px; }
-.selector-config-item { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-top: 1px solid #f3f4f6; font-size: 12px; }
-.selector-config-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#open-console-btn { width: 100%; text-align: left; }
 
 footer { border-top: 1px solid #e5e7eb; padding-top: 8px; }
 footer small { color: #9ca3af; font-size: 11px; line-height: 1.4; }

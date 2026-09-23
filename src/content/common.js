@@ -43,34 +43,44 @@
     return false;
   }
 
+  function isVisible(element) {
+    const style = getComputedStyle(element);
+    return element.getClientRects().length > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  }
+
+  function selectorScore(element, matcher) {
+    if (!matcher) return 0;
+    let score = 0;
+    for (const [name, value] of Object.entries(matcher.attributes || {})) if (element.getAttribute(name) === value) score += 8;
+    for (const name of matcher.classes || []) if (element.classList.contains(name)) score += 3;
+    for (const hint of matcher.ancestors || []) {
+      let parent = element.parentElement;
+      for (let depth = 0; parent && depth < 6; depth++, parent = parent.parentElement) {
+        if (parent.tagName.toLowerCase() !== hint.tag) continue;
+        const matched = (hint.classes || []).filter((name) => parent.classList.contains(name)).length;
+        if (matched) { score += matched * Math.max(1, 4 - depth); break; }
+      }
+    }
+    return score;
+  }
+
   function getConfiguredElement(selector, { last = false, matcher = null } = {}) {
-    let elements = [];
+    let candidates = [];
     try {
-      if (selector && typeof selector === 'string') elements = [...document.querySelectorAll(selector)].filter((el) => el.offsetParent !== null);
-    } catch (e) {
-      log('无效的用户选择器', selector, e);
+      if (selector && typeof selector === 'string') candidates = [...document.querySelectorAll(selector)].filter(isVisible);
+    } catch (error) { log('无效的用户选择器', selector, error); }
+    if (!candidates.length && matcher?.tag) {
+      try { candidates = [...document.querySelectorAll(matcher.tag)].filter(isVisible).filter((el) => selectorScore(el, matcher) > 0); } catch {}
     }
-    if (elements.length) {
-      if (last || matcher?.role === '回答结果' || matcher?.role === '用户提问') return elements[elements.length - 1];
-      if (matcher?.role === '输入框') return elements.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
-      return elements[0];
+    if (!candidates.length) return null;
+    if (matcher) {
+      const scores = candidates.map((el) => selectorScore(el, matcher));
+      const highest = Math.max(...scores);
+      if (highest > 0) candidates = candidates.filter((_el, index) => scores[index] === highest);
     }
-    if (!matcher?.tag) return null;
-    const candidates = [...document.querySelectorAll(matcher.tag)].filter((el) => el.offsetParent !== null);
-    const attrs = matcher.attributes || {};
-    const classes = matcher.classes || [];
-    const scored = candidates.map((el) => {
-      let score = 0;
-      for (const [name, value] of Object.entries(attrs)) if (el.getAttribute(name) === value) score += 8;
-      for (const name of classes) if (el.classList.contains(name)) score += 2;
-      return { el, score };
-    }).filter((item) => item.score > 0);
-    if (!scored.length) return null;
-    const bestScore = Math.max(...scored.map((item) => item.score));
-    const best = scored.filter((item) => item.score === bestScore).map((item) => item.el);
-    if (last || matcher.role === '回答结果' || matcher.role === '用户提问') return best[best.length - 1];
-    if (matcher.role === '输入框') return best.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
-    return best[0];
+    if (last || matcher?.role === '回答结果' || matcher?.role === '用户提问') return candidates[candidates.length - 1];
+    if (matcher?.role === '输入框') return candidates.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+    return candidates[0];
   }
 
   function inspectConfiguredElement(selector, matcher = null) {
@@ -82,12 +92,12 @@
       selectorError: null,
     };
     try {
-      if (selector) info.exactVisible = [...document.querySelectorAll(selector)].filter((el) => el.offsetParent !== null).length;
+      if (selector) info.exactVisible = [...document.querySelectorAll(selector)].filter(isVisible).length;
     } catch (e) {
       info.selectorError = String(e?.message || e).slice(0, 160);
     }
     if (matcher?.tag) {
-      info.fuzzyCandidates = [...document.querySelectorAll(matcher.tag)].filter((el) => el.offsetParent !== null).length;
+      try { info.fuzzyCandidates = [...document.querySelectorAll(matcher.tag)].filter(isVisible).filter((el) => selectorScore(el, matcher) > 0).length; } catch {}
     }
     return info;
   }

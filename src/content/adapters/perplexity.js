@@ -135,7 +135,7 @@
       tr.push('typed');
       await G.sleep(G.rand(400, 800));
 
-      const sendBtn = findSendButton();
+      const sendBtn = G.getConfiguredElement(config.sendSelector, { matcher: config.sendMatcher }) || findSendButton();
       if (sendBtn) {
         sendBtn.click();
         tr.push('sent via Submit button');

@@ -12,7 +12,47 @@ import { captureNodeViaLib } from '../lib/screenshot-node.js';
 
 const STATE_KEY = 'geo_state';
 const SELECTOR_OVERRIDES_KEY = 'geo_selector_overrides';
-const SELECTOR_SETUP_KEY = 'geo_selector_setup';
+const CUSTOM_PLATFORMS_KEY = 'geo_custom_platforms';
+const CONSOLE_TEST_KEY = 'geo_console_test';
+const CONSOLE_PLATFORM_KEY = 'geo_console_platform';
+const BUILTIN_NAMES = { perplexity: 'Perplexity', chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', doubao: '豆包', yuanbao: '元宝', kimi: 'Kimi' };
+const SELECTOR_FIELDS = ['input', 'question', 'answer', 'send'];
+
+async function getCustomPlatforms() {
+  const data = await chrome.storage.local.get(CUSTOM_PLATFORMS_KEY);
+  return data[CUSTOM_PLATFORMS_KEY] || {};
+}
+
+async function getPlatform(platform) {
+  if (PLATFORMS[platform]) return PLATFORMS[platform];
+  const custom = (await getCustomPlatforms())[platform];
+  if (!custom) return null;
+  const host = new URL(custom.newConversationUrl).hostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return {
+    ...custom,
+    match: new RegExp(`^https:\\/\\/${host}(?::\\d+)?(?:\\/|$)`, 'i'),
+    files: ['src/content/adapters/custom.js'],
+    entry: 'runCustomTask',
+    collectEntry: 'collectCustomPage',
+    config: { minChars: 1, maxWait: 180000 },
+  };
+}
+
+async function listPlatforms() {
+  const custom = await getCustomPlatforms();
+  return [
+    ...Object.keys(PLATFORMS).map((key) => ({ key, name: BUILTIN_NAMES[key], custom: false, url: PLATFORMS[key].newConversationUrl })),
+    ...Object.entries(custom).map(([key, item]) => ({ key, name: item.name, custom: true, url: item.newConversationUrl })),
+  ];
+}
+
+async function findPlatformForUrl(url) {
+  for (const item of await listPlatforms()) {
+    const cfg = await getPlatform(item.key);
+    if (cfg?.match.test(url)) return item.key;
+  }
+  return null;
+}
 
 async function getSelectorOverrides() {
   const data = await chrome.storage.local.get(SELECTOR_OVERRIDES_KEY);
@@ -24,56 +64,110 @@ async function getPlatformConfig(platform, config = {}) {
   return { ...config, ...(overrides[platform] || {}) };
 }
 
-async function configureCurrentPageSelectors(enhanced = false) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !tab.url) return { ok: false, error: 'no_active_tab' };
-  const platform = Object.keys(PLATFORMS).find((key) => PLATFORMS[key].match.test(tab.url));
-  if (!platform) return { ok: false, error: 'unsupported_page' };
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/selector-picker.js'] });
-  const pick = async (tabId, mode) => {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId }, func: (pickerMode) => globalThis.startGEOSelectorPicker({ mode: pickerMode }), args: [mode],
-    });
-    return result;
-  };
-  let result;
-  if (enhanced) {
-    const inputConfig = await pick(tab.id, 'input');
-    if (!inputConfig) return { ok: false, cancelled: true };
-    const flowId = `selector_${Date.now()}`;
-    await chrome.tabs.update(tab.id, { url: PLATFORMS[platform].newConversationUrl, active: true });
-    await waitTabComplete(tab.id, 60000);
-    await sleep(1500);
-    await chrome.storage.session.set({ [SELECTOR_SETUP_KEY]: { flowId, platform, tabId: tab.id, inputConfig } });
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/selector-picker.js'] });
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: (report) => { globalThis.startGEOSelectorPicker({ mode: 'response', report }); return true; },
-      args: [{ type: 'SELECTOR_RESPONSE_PICKED', flowId }],
-    });
-    return { ok: true, pending: true, platform };
-  } else {
-    result = await pick(tab.id, 'all');
-    if (!result) return { ok: false, cancelled: true };
+function cleanSelectorConfig(input) {
+  const config = {};
+  for (const field of SELECTOR_FIELDS) {
+    const selector = input?.[`${field}Selector`];
+    const matcher = input?.[`${field}Matcher`];
+    if (typeof selector === 'string' && selector.trim()) {
+      config[`${field}Selector`] = selector.trim().slice(0, 500);
+      if (matcher && typeof matcher === 'object') config[`${field}Matcher`] = matcher;
+    }
   }
-  const overrides = await getSelectorOverrides();
-  overrides[platform] = { ...result, savedAt: Date.now() };
-  await chrome.storage.local.set({ [SELECTOR_OVERRIDES_KEY]: overrides });
-  chrome.runtime.sendMessage({ type: 'SELECTOR_CONFIG_UPDATE', platform, config: overrides[platform] }).catch(() => {});
-  return { ok: true, platform, config: overrides[platform] };
+  return config;
 }
 
-async function finishEnhancedSelectorSetup(flowId, responseConfig) {
-  const data = await chrome.storage.session.get(SELECTOR_SETUP_KEY);
-  const setup = data[SELECTOR_SETUP_KEY];
-  if (!setup || setup.flowId !== flowId) return { ok: false, error: 'setup_not_found' };
-  await chrome.storage.session.remove(SELECTOR_SETUP_KEY);
-  if (!responseConfig) return { ok: false, cancelled: true };
+async function startSelectorPick(platform, field, requestId) {
+  if (!SELECTOR_FIELDS.includes(field) || !await getPlatform(platform)) return { ok: false, error: 'invalid_platform_or_field' };
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url) return { ok: false, error: 'no_active_tab' };
+  const cfg = await getPlatform(platform);
+  if (!cfg.match.test(tab.url)) return { ok: false, error: 'wrong_platform_page', url: tab.url };
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/element-picker.js'] });
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (options) => { globalThis.startGEOElementPicker(options); return true; },
+    args: [{ field, platform, requestId }],
+  });
+  return { ok: true, tabId: tab.id };
+}
+
+async function previewSelector(platform, field, config) {
+  if (!SELECTOR_FIELDS.includes(field)) return { ok: false, error: 'invalid_field' };
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const cfg = await getPlatform(platform);
+  if (!tab?.id || !cfg?.match.test(tab.url || '')) return { ok: false, error: 'wrong_platform_page' };
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/content/common.js'] });
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (key, selectors) => {
+      const selector = selectors[`${key}Selector`];
+      const matcher = selectors[`${key}Matcher`];
+      if (!selector) return { ok: false, error: 'selector_empty' };
+      const info = globalThis.GEO.inspectConfiguredElement(selector, matcher);
+      const element = globalThis.GEO.getConfiguredElement(selector, { last: key !== 'input' && key !== 'send', matcher });
+      let matches = [];
+      try { matches = [...document.querySelectorAll(selector)].filter((el) => el.getClientRects().length > 0); } catch {}
+      return {
+        ok: !!element, info,
+        selected: element ? { tag: element.tagName, text: (element.innerText || element.value || '').trim().slice(0, 600), editable: element.isContentEditable || /^(INPUT|TEXTAREA)$/.test(element.tagName) } : null,
+        candidates: matches.slice(-5).map((el) => (el.innerText || el.value || '').trim().slice(0, 120)),
+      };
+    },
+    args: [field, cleanSelectorConfig(config)],
+  });
+  return result;
+}
+
+async function saveSelectorOverride(platform, config) {
+  if (!await getPlatform(platform)) return { ok: false, error: 'unknown_platform' };
+  const clean = cleanSelectorConfig(config);
   const overrides = await getSelectorOverrides();
-  overrides[setup.platform] = { ...setup.inputConfig, ...responseConfig, savedAt: Date.now() };
+  overrides[platform] = { ...clean, savedAt: Date.now() };
   await chrome.storage.local.set({ [SELECTOR_OVERRIDES_KEY]: overrides });
-  chrome.runtime.sendMessage({ type: 'SELECTOR_CONFIG_UPDATE', platform: setup.platform, config: overrides[setup.platform] }).catch(() => {});
-  return { ok: true, platform: setup.platform };
+  chrome.runtime.sendMessage({ type: 'SELECTOR_CONFIG_UPDATE', platform, config: overrides[platform] }).catch(() => {});
+  return { ok: true, config: overrides[platform] };
+}
+
+async function addCustomPlatform(name, url) {
+  const title = String(name || '').trim().slice(0, 50);
+  let parsed;
+  try { parsed = new URL(url); } catch { return { ok: false, error: 'invalid_url' }; }
+  if (!title || parsed.protocol !== 'https:' || !parsed.hostname) return { ok: false, error: 'invalid_platform' };
+  const existing = await findPlatformForUrl(parsed.href);
+  if (existing) return { ok: false, error: 'platform_already_exists' };
+  const platforms = await getCustomPlatforms();
+  const key = `custom_${Date.now()}`;
+  platforms[key] = { name: title, newConversationUrl: parsed.href, hostname: parsed.hostname };
+  await chrome.storage.local.set({ [CUSTOM_PLATFORMS_KEY]: platforms });
+  return { ok: true, key };
+}
+
+async function setConsoleTest(state) {
+  await chrome.storage.session.set({ [CONSOLE_TEST_KEY]: state });
+  chrome.runtime.sendMessage({ type: 'CONSOLE_TEST_UPDATE', state }).catch(() => {});
+}
+
+async function startPlatformTest(platform, keyword, config) {
+  const cfg = await getPlatform(platform);
+  const query = String(keyword || '').trim();
+  if (!cfg || !query) return { ok: false, error: 'platform_or_keyword_missing' };
+  if ((await getState()).running) return { ok: false, error: 'batch_running' };
+  const previous = (await chrome.storage.session.get(CONSOLE_TEST_KEY))[CONSOLE_TEST_KEY];
+  if (previous?.running) return { ok: false, error: 'test_running' };
+  const state = { running: true, platform, keyword: query, startedAt: Date.now() };
+  await setConsoleTest(state);
+  startKeepAlive();
+  (async () => {
+    try {
+      const result = await runOneTask({ platform, keyword: query }, { configOverride: cleanSelectorConfig(config), screenshot: false });
+      await setConsoleTest({ ...state, running: false, status: result.status, answerChars: result.answerChars || 0,
+        text: String(result.text || '').slice(0, 3000), error: result.error || null, trace: result.trace || [], url: result.url || null });
+    } catch (error) {
+      await setConsoleTest({ ...state, running: false, status: 'failed', error: String(error?.message || error), trace: errorTrace('test exception', error) });
+    } finally { stopKeepAlive(); }
+  })();
+  return { ok: true };
 }
 
 // 把 HTML 正文里的 <img> 替换成 alt 占位文本,避免导出/渲染时图片喧宾夺主。
@@ -186,16 +280,66 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'GET_STATE':
         sendResponse(await getState());
         break;
-      case 'START':
+      case 'START': {
+        if ((await getState()).running || (await chrome.storage.session.get(CONSOLE_TEST_KEY))[CONSOLE_TEST_KEY]?.running) {
+          sendResponse({ ok: false, error: 'task_running' });
+          break;
+        }
         sendResponse({ ok: true });
         runBatch(msg.keywords, msg.platforms); // 不 await，后台跑
         break;
+      }
       case 'COLLECT_CURRENT':
         sendResponse({ ok: true });
         collectCurrentPage(); // 采集当前活动标签页，追加到结果
         break;
-      case 'CONFIGURE_CURRENT_SELECTORS':
-        configureCurrentPageSelectors(!!msg.enhanced).then(sendResponse).catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+      case 'GET_PLATFORM_CATALOG':
+        sendResponse(await listPlatforms());
+        break;
+      case 'ADD_CUSTOM_PLATFORM':
+        sendResponse(await addCustomPlatform(msg.name, msg.url));
+        break;
+      case 'DELETE_CUSTOM_PLATFORM': {
+        const custom = await getCustomPlatforms();
+        if (!custom[msg.platform]) { sendResponse({ ok: false, error: 'not_custom_platform' }); break; }
+        delete custom[msg.platform];
+        await chrome.storage.local.set({ [CUSTOM_PLATFORMS_KEY]: custom });
+        const overrides = await getSelectorOverrides();
+        delete overrides[msg.platform];
+        await chrome.storage.local.set({ [SELECTOR_OVERRIDES_KEY]: overrides });
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'SET_CONSOLE_PLATFORM':
+        await chrome.storage.session.set({ [CONSOLE_PLATFORM_KEY]: msg.platform });
+        sendResponse({ ok: true });
+        break;
+      case 'GET_CONSOLE_PLATFORM':
+        sendResponse((await chrome.storage.session.get(CONSOLE_PLATFORM_KEY))[CONSOLE_PLATFORM_KEY] || null);
+        break;
+      case 'START_SELECTOR_PICK':
+        sendResponse(await startSelectorPick(msg.platform, msg.field, msg.requestId));
+        break;
+      case 'STOP_SELECTOR_PICK':
+        if (msg.tabId) {
+          await chrome.scripting.executeScript({ target: { tabId: msg.tabId }, func: () => globalThis.__geoElementPickerCancel?.() });
+        }
+        sendResponse({ ok: true });
+        break;
+      case 'SELECTOR_ELEMENT_PICKED':
+        sendResponse({ ok: true });
+        break;
+      case 'PREVIEW_SELECTOR':
+        sendResponse(await previewSelector(msg.platform, msg.field, msg.config));
+        break;
+      case 'SAVE_SELECTOR_OVERRIDE':
+        sendResponse(await saveSelectorOverride(msg.platform, msg.config));
+        break;
+      case 'START_PLATFORM_TEST':
+        sendResponse(await startPlatformTest(msg.platform, msg.keyword, msg.config));
+        break;
+      case 'GET_PLATFORM_TEST':
+        sendResponse((await chrome.storage.session.get(CONSOLE_TEST_KEY))[CONSOLE_TEST_KEY] || null);
         break;
       case 'GET_SELECTOR_OVERRIDES':
         sendResponse(await getSelectorOverrides());
@@ -207,9 +351,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
-      case 'SELECTOR_RESPONSE_PICKED':
-        sendResponse(await finishEnhancedSelectorSetup(msg.flowId, msg.result));
-        break;
       case 'STOP': {
         const s = await getState();
         s.stopRequested = true;
@@ -220,7 +361,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       default:
         sendResponse({ ok: false, error: 'unknown message' });
     }
-  })();
+  })().catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
   return true; // 异步 sendResponse
 });
 
@@ -263,8 +404,8 @@ async function runBatch(keywords, platforms) {
 }
 
 // ---- 单任务：打开 tab → 注入 → 调用 adapter 入口 ----
-async function runOneTask(task) {
-  const cfg = PLATFORMS[task.platform];
+async function runOneTask(task, options = {}) {
+  const cfg = await getPlatform(task.platform);
   if (!cfg) {
     return { status: 'failed', error: `unsupported_platform: ${task.platform}（当前 SW 已注册：${Object.keys(PLATFORMS).join(', ')}）` };
   }
@@ -292,13 +433,13 @@ async function runOneTask(task) {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (entryName, query, config) => globalThis[entryName](query, config),
-      args: [cfg.entry, task.keyword, await getPlatformConfig(task.platform, cfg.config || {})],
+      args: [cfg.entry, task.keyword, options.configOverride ? { ...(cfg.config || {}), ...options.configOverride } : await getPlatformConfig(task.platform, cfg.config || {})],
     });
 
     const out = sanitizeResultHtml(result) || { status: 'failed', error: 'no_result' };
 
     // 采集成功才截图（整页滚动拼接）
-    if (out.status === 'ok') {
+    if (out.status === 'ok' && options.screenshot !== false) {
       await attachScreenshot(out, tab, task.platform, task.keyword);
     }
 
@@ -359,12 +500,12 @@ async function collectCurrentPage() {
     }
 
     // 识别平台
-    const platform = Object.keys(PLATFORMS).find((k) => PLATFORMS[k].match.test(tab.url));
+    const platform = await findPlatformForUrl(tab.url);
     if (!platform) {
       await pushCollectResult({ sessionId, status: 'failed', error: 'unsupported_page', keyword: tab.title || tab.url });
       return;
     }
-    const cfg = PLATFORMS[platform];
+    const cfg = await getPlatform(platform);
     if (!cfg.collectEntry) {
       await pushCollectResult({ sessionId, status: 'failed', error: 'collect_not_supported', platform, keyword: tab.title || '' });
       return;
