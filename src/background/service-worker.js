@@ -15,7 +15,7 @@ const SELECTOR_OVERRIDES_KEY = 'geo_selector_overrides';
 const CUSTOM_PLATFORMS_KEY = 'geo_custom_platforms';
 const CONSOLE_TEST_KEY = 'geo_console_test';
 const CONSOLE_PLATFORM_KEY = 'geo_console_platform';
-const BUILTIN_NAMES = { perplexity: 'Perplexity', chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', doubao: '豆包', yuanbao: '元宝', kimi: 'Kimi' };
+const BUILTIN_NAMES = { perplexity: 'Perplexity', chatgpt: 'ChatGPT', gemini: 'Gemini', claude: 'Claude', doubao: '豆包', yuanbao: '元宝', kimi: 'Kimi', qwen: '千问', deepseek: 'DeepSeek' };
 const SELECTOR_FIELDS = ['input', 'question', 'answer', 'send'];
 
 async function getCustomPlatforms() {
@@ -117,6 +117,39 @@ async function previewSelector(platform, field, config) {
     args: [field, cleanSelectorConfig(config)],
   });
   return result;
+}
+
+async function trustedClick(tabId, selector) {
+  if (!tabId || typeof selector !== 'string' || !selector || selector.length > 500) return { ok: false, error: 'invalid_click_target' };
+  const [{ result: point }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (css) => {
+      let elements;
+      try { elements = [...document.querySelectorAll(css)].filter((el) => el.getClientRects().length > 0); }
+      catch { return null; }
+      const element = elements[elements.length - 1];
+      if (!element) return null;
+      element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      const rect = element.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    },
+    args: [selector],
+  });
+  if (!point) return { ok: false, error: 'click_target_not_found' };
+  const target = { tabId };
+  const attach = () => new Promise((resolve, reject) => chrome.debugger.attach(target, '1.3', () => chrome.runtime.lastError ? reject(new Error(chrome.runtime.lastError.message)) : resolve()));
+  const command = (type, extra = {}) => new Promise((resolve, reject) => chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+    type, x: point.x, y: point.y, button: 'left', clickCount: 1, ...extra,
+  }, () => chrome.runtime.lastError ? reject(new Error(chrome.runtime.lastError.message)) : resolve()));
+  await attach();
+  try {
+    await command('mouseMoved');
+    await command('mousePressed');
+    await command('mouseReleased');
+    return { ok: true };
+  } finally {
+    await new Promise((resolve) => chrome.debugger.detach(target, resolve));
+  }
 }
 
 async function saveSelectorOverride(platform, config) {
@@ -274,7 +307,7 @@ async function ensureActiveSession() {
 }
 
 // ---- 消息入口 ----
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
       case 'GET_STATE':
@@ -331,6 +364,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       case 'PREVIEW_SELECTOR':
         sendResponse(await previewSelector(msg.platform, msg.field, msg.config));
+        break;
+      case 'TRUSTED_CLICK':
+        sendResponse(await trustedClick(sender.tab?.id, msg.selector));
         break;
       case 'SAVE_SELECTOR_OVERRIDE':
         sendResponse(await saveSelectorOverride(msg.platform, msg.config));

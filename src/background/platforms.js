@@ -58,4 +58,20 @@ export const PLATFORMS = {
     collectEntry: 'collectKimiPage',
     config: { minChars: 400, maxWait: 240000 },
   },
+  qwen: {
+    match: /chat\.qwen\.ai/,
+    newConversationUrl: 'https://chat.qwen.ai/',
+    files: ['src/content/adapters/qwen.js'],
+    entry: 'runQwenTask',
+    collectEntry: 'collectQwenPage',
+    config: { maxWait: 180000 },
+  },
+  deepseek: {
+    match: /chat\.deepseek\.com/,
+    newConversationUrl: 'https://chat.deepseek.com/',
+    files: ['src/content/adapters/deepseek.js'],
+    entry: 'runDeepSeekTask',
+    collectEntry: 'collectDeepSeekPage',
+    config: { maxWait: 180000 },
+  },
 };

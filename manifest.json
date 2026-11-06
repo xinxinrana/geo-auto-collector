@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GEO 自动采集",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "自动检测关键词在 AI 搜索平台的内容表现，采集正文/引用/DOM/截图并导出。",
   "permissions": [
     "tabs",
