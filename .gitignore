@@ -5,3 +5,12 @@ dev/snapshots/*.html
 Thumbs.db
 .DS_Store
 output/
+node_modules/
+.geo-bridge/
+coverage/
+test-results/
+playwright-report/
+
+# 采集产物：分析输入，不进版本库
+采集结果/
+归档/

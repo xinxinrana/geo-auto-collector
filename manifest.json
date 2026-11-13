@@ -1,33 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "GEO 自动采集",
-  "version": "0.6.0",
-  "description": "自动检测关键词在 AI 搜索平台的内容表现，采集正文/引用/DOM/截图并导出。",
-  "permissions": [
-    "tabs",
-    "scripting",
-    "storage",
-    "downloads",
-    "alarms",
-    "activeTab",
-    "debugger",
-    "sidePanel"
-  ],
-  "host_permissions": ["<all_urls>"],
-  "side_panel": {
-    "default_path": "src/console/console.html"
-  },
-  "background": {
-    "service_worker": "src/background/service-worker.js",
-    "type": "module"
-  },
-  "action": {
-    "default_popup": "src/popup/popup.html",
-    "default_title": "GEO 自动采集"
-  },
-  "icons": {
-    "16": "src/popup/icon.png",
-    "48": "src/popup/icon.png",
-    "128": "src/popup/icon.png"
+  "name": "GEO 采集助手",
+  "version": "0.8.2",
+  "minimum_chrome_version": "120",
+  "description": "在已登录的 AI 对话页面（Perplexity、豆包）采集回答与引用，通过本机 HTTP 和 CLI 交付给 Agent。",
+  "permissions": ["scripting", "storage", "alarms", "sidePanel", "debugger"],
+  "host_permissions": ["https://www.perplexity.ai/*", "https://perplexity.ai/*", "https://www.doubao.com/*", "https://doubao.com/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "extension/background.js", "type": "module" },
+  "action": { "default_title": "打开 GEO 采集助手" },
+  "side_panel": { "default_path": "extension/panel.html" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*"
   }
 }

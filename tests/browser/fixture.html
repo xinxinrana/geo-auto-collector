@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Perplexity 测试页面</title>
+<style>body{font:16px/1.8 system-ui;margin:40px auto;max-width:800px}textarea{width:90%;height:80px}button{padding:8px 16px}section{padding:20px;background:#f2f7f3;margin:12px 0}.prose{padding:8px}h2{font-size:20px}</style></head>
+<body><main><h1>本地采集测试</h1><form><textarea aria-label="Question"></textarea><button type="button" aria-label="Submit">Submit</button></form><div class="focus:outline-none" id="rounds"></div></main>
+<script>
+  globalThis.submissions = 0;
+  document.querySelector('[aria-label="Submit"]').onclick = () => {
+    globalThis.submissions++;
+    const keyword = document.querySelector('textarea').value;
+    const round = document.createElement('div'); round.className = 'flex flex-col gap-y-md';
+    const question = document.createElement('h2'); question.textContent = keyword;
+    const section = document.createElement('section');
+    const answer = document.createElement('div'); answer.className = 'prose'; answer.textContent = 'GEO 帮助内容在生成式搜索中被理解和引用。';
+    const link = document.createElement('a'); link.href = 'https://example.org/reference'; link.textContent = '参考来源'; answer.append(link);
+    section.append(answer); round.append(question, section); document.getElementById('rounds').append(round);
+    const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop response'); stop.textContent = 'Stop'; section.append(stop);
+    setTimeout(() => { stop.remove(); const copy = document.createElement('button'); copy.setAttribute('aria-label', 'Copy'); copy.textContent = 'Copy'; section.append(copy); }, keyword.includes('慢速') ? 10000 : 200);
+  };
+</script></body></html>

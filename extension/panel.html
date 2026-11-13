@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GEO 采集助手</title><link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header><div><span class="eyebrow">BROWSER COLLECTOR</span><h1>GEO 采集助手</h1></div><span id="version" class="version"></span></header>
+  <div class="connection" role="status"><span id="dot" class="dot"></span><span id="connection-status">正在读取状态</span></div>
+  <main>
+    <details id="setup"><summary>连接本机服务</summary>
+      <p>在项目目录运行 <code>./geo up</code>，然后点击连接。</p>
+      <form id="connect-form"><label>端口<input id="port" type="number" min="1" max="65535" value="8787" required></label><div class="row"><button type="submit">连接</button><button id="disconnect" type="button" class="secondary">断开</button></div></form>
+    </details>
+    <section class="card">
+      <div class="section-title"><h2>采集对话</h2><span class="badge">Perplexity · 豆包</span></div>
+      <p class="hint">请先登录平台。定位不明确时会暂停并保存诊断。</p>
+      <label for="platform">平台</label><select id="platform"><option value="perplexity">Perplexity</option><option value="doubao">豆包</option></select>
+      <form id="run-form"><label for="keyword">提问内容</label><textarea id="keyword" rows="4" maxlength="20000" placeholder="例如：GEO 与传统 SEO 有哪些区别？"></textarea>
+        <label class="check"><input id="focus" type="checkbox" checked> 前置采集页面</label>
+        <div class="row"><button id="run" type="submit">新对话并采集</button><button id="stop" type="button" class="secondary danger">停止自动化</button></div>
+      </form>
+      <div class="divider"></div>
+      <label for="tab">已有对话标签页</label><div class="row"><select id="tab"><option value="">自动选择唯一标签页</option></select><button id="refresh-tabs" class="secondary compact" type="button">刷新</button></div>
+      <div class="row spaced"><button id="collect" class="secondary" type="button">采集已有回答</button><button id="shot" class="secondary" type="button">回答截图</button></div>
+    </section>
+    <section class="card"><div class="section-title"><h2>任务</h2><span id="task-count" class="muted">0</span></div><div id="tasks" class="tasks"><p class="empty">还没有采集任务</p></div></section>
+    <section class="card" id="result-section" hidden><div class="section-title"><h2>采集结果</h2><div class="row"><button id="export-html" type="button" class="secondary compact">报告</button><button id="export" type="button" class="secondary compact">JSON</button></div></div><p id="result-meta" class="hint"></p><pre id="result-text"></pre><ul id="citations"></ul><details id="diagnostic-detail"><summary>诊断与原始数据</summary><pre id="result-data"></pre></details></section>
+    <details class="card"><summary>检查与修复元素</summary><p class="hint">在已有对话上检查。先实测，验证通过后才能保存；不会重新提问。</p>
+      <label for="field">页面角色</label><select id="field"><option value="input">输入框</option><option value="send">发送按钮</option><option value="question">当前问题</option><option value="answer">当前回答</option></select>
+      <label for="selector">CSS 选择器</label><input id="selector" placeholder="例如 textarea" maxlength="2000">
+      <div class="row spaced"><button id="inspect" class="secondary" type="button">检查当前定位</button><button id="test-anchor" class="secondary" type="button">实测选择器</button><button id="save-anchor" type="button" disabled>保存</button></div>
+      <p id="anchor-status" class="hint"></p>
+    </details>
+    <section class="handoff"><h2>交给 Agent</h2><p class="hint">复制当前提问和工具入口。</p><button id="copy" type="button" class="secondary">复制 Agent 接管入口</button><details><summary>入口预览</summary><pre id="handoff"></pre></details></section>
+  </main>
+  <div id="notice" role="alert" hidden></div>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

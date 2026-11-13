@@ -1,40 +1,152 @@
-# GEO 自动采集
+# GEO 采集助手
 
-一个基于 Chrome Manifest V3 的浏览器扩展，用于在 AI 对话平台中按关键词执行提问、采集回答和引用，并保存页面截图与对话 DOM，供后续 GEO 分析。
+让 Agent 通过本机 HTTP 或 CLI 操作已登录的 AI 对话网页（Perplexity、豆包），采集回答与可见引用。Chrome 侧栏提供相同的人工采集入口、任务查看、定位检查和报告导出。
 
-内置支持 ChatGPT、Claude、Gemini、Perplexity、豆包、元宝、Kimi、千问和 DeepSeek，也可在平台控制台添加其他 HTTPS 对话平台。页面结构变化时，可逐个平台调整输入框、用户提问、回答正文和发送按钮。配置保存在浏览器本地，并优先于内置规则使用。
+版本由根目录 `manifest.json` 提供。当前支持 Perplexity 与豆包，平台以注册表形式定义在 `shared/protocol.js`。Perplexity 的扩展加载、采集链路、PNG 截图和恢复已在独立 Chromium 与本地测试页上验证；豆包适配器依据真机 DOM 锚点实现，需在已登录浏览器中验收。
 
-## 安装
+## 环境与启动
 
-1. 下载或克隆本仓库。
-2. 在 Chrome 地址栏打开 `chrome://extensions`，开启“开发者模式”。
-3. 选择“加载已解压的扩展程序”，并选择仓库目录。
-4. 固定扩展图标；打开目标 AI 平台并登录后即可开始使用。
+- Node.js 24.13 或更高版本，低于 27；开发验证环境为 Node 26.12。
+- Chrome 120 或更高版本。
+- 已登录的 Perplexity 账号。
 
-修改代码后，在 `chrome://extensions` 中点击扩展的刷新按钮以加载最新文件。
+在项目根目录执行：
 
-## 使用
+```bash
+npm ci
+./geo up
+```
 
-在扩展弹窗中输入关键词（每行一条）、选择平台，然后开始检测。也可以在已经生成回答的平台页面使用“采集当前页面”。结果保存在本地采集会话，可导出查看。
+服务以前台进程运行，默认地址为 `http://127.0.0.1:8787`，按 `Ctrl+C` 停止。
 
-若某个平台改版导致元素无法识别，点击弹窗中的“打开平台控制台”。控制台常驻于浏览器侧边栏，可打开目标平台页面，分别在网页中点选元素，也可直接输入 CSS 选择器。点选时网页上只有元素高亮，不会出现遮挡提示；可在侧边栏取消，或按 Esc 退出。新选择先保存为草稿；“预览”用于确认当前网页命中情况，“运行一次”会在当前平台发出一条测试提示词且不会写入采集会话。确认后点击“保存并应用”，后续采集才会使用新配置。切换平台或关闭控制台不会丢失草稿。
+在 Chrome 的 `chrome://extensions` 中开启开发者模式，选择“加载已解压的扩展程序”，加载本项目根目录。点击扩展图标打开侧栏，直接点击“连接”。CLI 与扩展均直接连接本机服务，无需认证或配对。
 
-新增平台时填写名称和新聊天页 HTTPS 地址，再点选输入框、回答正文；用户提问和发送按钮可选。自定义平台需要先试运行确认其网页支持通用输入与发送流程。
+```bash
+./geo status
+./geo platforms
+```
 
-## 数据与权限
+`extension.connected` 和 `extension.ready` 均为 `true` 后可以执行采集。服务在线、扩展连接和真实采集成功是不同状态。
 
-采集结果、截图、会话和页面元素配置保存在本地浏览器存储中。扩展使用所有网站访问权限，以及标签页、侧边栏、脚本注入、本地存储、下载、定时唤醒和调试器权限，以支持用户自行添加平台、页面交互、截图和文件导出。扩展不提供绕过登录、访问控制或平台限制的功能。
+服务数据默认保存到 `~/.geo-bridge`。可通过环境变量切换数据目录和端口；CLI、服务及侧栏必须使用同一配置：
 
-请遵守所使用平台的条款，并合理控制采集频率。采集内容仅用于用户自己的 GEO 检测与分析。
+```bash
+export GEO_BRIDGE_HOME=/absolute/path/to/geo-data
+export GEO_BRIDGE_PORT=8788
+./geo up
+```
 
-## 项目结构
+## Agent 调用
 
-- `src/background/`：平台注册、任务调度与扩展后台
-- `src/content/`：页面交互、元素选择器和各平台适配器
-- `src/popup/`：扩展弹窗、任务进度、会话与导出操作
-- `src/console/`：平台控制台与元素配置
-- `src/storage/`：本地采集数据存储
-- `src/export/`：HTML 报告生成
-- `src/lib/`：截图与打包依赖
-- `docs/`：需求、平台 DOM 记录和实现文档
-- `dev/`：开发辅助与页面结构侦查脚本
+帮助与文档在服务关闭时仍可读取：
+
+```bash
+./geo help
+./geo docs connection
+./geo docs run
+```
+
+新建标签页、提问并采集：
+
+```bash
+./geo run --platform perplexity --keyword "GEO 是什么" --wait 0 --idempotency-key research-001
+```
+
+使用响应中的真实任务 ID 查询：
+
+```bash
+./geo task <taskId>
+./geo result <taskId>
+./geo result <taskId> --view text --max-chars 4000
+./geo result <taskId> --view citations
+./geo events <taskId> --since 0 --wait 10000
+```
+
+`--wait` 的单位是毫秒，默认 0，只返回任务入口。可以指定 `--wait 240000` 等待终态；CLI 等待超时不取消页面任务。`--no-focus` 不主动前置标签页，不保证后台页面不会被浏览器冻结。
+
+采集已有对话，不提交问题：
+
+```bash
+./geo collect --platform perplexity --wait 0
+./geo collect --platform perplexity --tab-id 123 --no-focus --wait 0
+```
+
+多个 Perplexity 标签页时返回 `ambiguous_tabs` 和候选，必须用实际 `tabId` 指定目标。
+
+## 检查与修复
+
+```bash
+./geo inspect --platform perplexity --field answer --tab-id 123 --wait 10000
+./geo dom --platform perplexity --field answer --tab-id 123 --max-chars 6000 --wait 10000
+./geo fix --platform perplexity --field input --selector 'textarea' --tab-id 123 --test-only --wait 10000
+./geo result <testTaskId> --view data
+```
+
+保存时使用实测结果中的真实 `revision`，服务会重新验证页面并检查配置版本：
+
+```bash
+./geo fix --platform perplexity --field input --selector 'textarea' --tab-id 123 --save --expected-revision 0 --wait 10000
+./geo anchors --wait 10000
+```
+
+`input`、`send`、`question`、`answer` 为四种角色。配置只修复定位，不自动适配新的生成状态或来源弹层交互。多个候选、错误轮次、过宽容器不会当作成功结果。
+
+任务挂起时读取响应给出的诊断链接：
+
+```bash
+./geo diagnostic <taskId>
+./geo diagnostic <taskId> --view full
+```
+
+## 停止、截图与导出
+
+```bash
+./geo stop --task-id <taskId> --wait 15000
+./geo shot --platform perplexity --tab-id 123 --wait 10000
+./geo result <shotTaskId> --view screenshot --out /tmp/geo-answer.png
+```
+
+停止命令只停止插件后续操作，不点击网站停止生成按钮。未获得 runner 的结束确认时，原任务保留执行归属。
+
+截图使用 `chrome.debugger`，扩展因此声明 debugger 权限。截图不主动前置或滚动页面，DevTools、页面布局或虚拟化内容可能导致截图失败。只有截图成功才提供 PNG 下载链接。
+
+侧栏可将选中结果导出为 JSON 和独立 HTML 报告。HTML 报告使用文本渲染，不执行网页采集到的 HTML。正文、原始回答 HTML、剪枝 QA DOM、引用和诊断也可通过结果视图获取。
+
+## 能力与限制
+
+| 能力 | MVP 范围 |
+|---|---|
+| 平台 | Perplexity（真实网站待验收）、豆包（真机锚点，待验收） |
+| 采集 | 新对话提问；已有对话最后一轮采集 |
+| 引用 | 回答内可见外部链接，不自动展开来源弹层；明确标记非完整来源列表 |
+| 完成判断 | 当前轮次正文、生成/完成信号和稳定窗口共同验证 |
+| 故障恢复 | 后台重连原 runner；上下文消失时中断，不自动重复提问 |
+| 数据 | SQLite 和文件保存 bridge 结果，扩展 IndexedDB 保存本地结果与待同步事件 |
+| 修复 | 单角色实测、显式保存、版本冲突检查、最近 20 次配置历史 |
+| 截图 | 单独 shot 动作，失败不影响已有正文 |
+| 人工入口 | 侧栏；采集需 bridge 在线，与 Agent 共用任务机制 |
+| 暂未提供 | 批量任务、完整来源弹层采集、会话分组与 ZIP 打包 |
+
+网页“点击发送”与本地数据库不是同一个事务。提交结果不确定时中断并报告，不自动重试发送。页面停止变化不直接代表回答完成；超时保存可用的部分正文，并标记 `complete: false`。
+
+本机服务同时使用一个扩展连接。目录迁移或扩展卸载前，先停止原任务并备份数据。
+
+## 开发验证
+
+```bash
+npm run check
+npm test
+```
+
+测试使用临时目录、本机回环端口、真实 bridge/扩展/runner 代码及模拟 DOM、Chrome API 和 IndexedDB。不会打开或控制用户浏览器。
+
+实际浏览器自动化测试需要 Playwright Chromium 和系统 `openssl`：
+
+```bash
+npm exec -- playwright install chromium
+npm run test:browser
+```
+
+浏览器测试使用临时用户目录、无界面 Chromium 和本机 HTTPS 测试页。域名映射只作用于该测试浏览器进程；不使用用户账号。测试覆盖扩展真实加载、界面命令、采集与引用、PNG 下载、后台终止恢复、页面刷新中断和 HTML 报告下载。
+
+本地测试页不代表当前 Perplexity 页面适配已通过。真实验收步骤见 [MVP 验收清单](docs/MVP验收清单.md)，架构见 [开发前技术调研与架构设计](docs/开发前技术调研与架构设计.md)。
