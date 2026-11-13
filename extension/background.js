@@ -101,10 +101,61 @@ async function accept(task) {
   });
   if (launch) void launchTask(task.id).catch(e => finishLocal(task.id, { status: e.code === 'stopped' ? 'interrupted' : 'failed', step: 'preparing', error: { code: e.code || 'execution_error', message: e.message, ...(e.details || {}) } })).finally(() => launching.delete(task.id));
 }
+// 每次 run 都新建标签页会让浏览器越积越多、拖慢整机。
+// 同一页面动作本来就是串行的，所以复用一个已有标签页即可；并保留上限。
+const MAX_PLATFORM_TABS = 3;
+async function trimPlatformTabs(platform, keepId) {
+  const tabs = await chrome.tabs.query({ url: platform.tabPatterns });
+  const excess = tabs.length - MAX_PLATFORM_TABS;
+  if (excess <= 0) return;
+  const extra = tabs.filter(t => t.id !== keepId).sort((a, b) => (a.id || 0) - (b.id || 0));
+  for (let i = 0; i < excess && i < extra.length; i++) {
+    try { await chrome.tabs.remove(extra[i].id); } catch { /* 用户可能已手动关闭。 */ }
+  }
+}
+async function runTab(command, platform) {
+  const tabs = await chrome.tabs.query({ url: platform.tabPatterns });
+  // 复用最老的标签页：导航/刷新到新对话页，等于"直接替换掉"上一次的页面。
+  // 只复用不刷新会沿用上一轮的对话 DOM，本轮问题根本不在页面上。
+  const target = tabs.length ? tabs.slice().sort((a, b) => (a.id || 0) - (b.id || 0))[0] : null;
+  if (!target) return chrome.tabs.create({ url: platform.newChatUrl, active: command.focus });
+  const reloading = target.url === platform.newChatUrl;
+  const tab = reloading
+    ? await chrome.tabs.reload(target.id).then(() => chrome.tabs.get(target.id))
+    : await chrome.tabs.update(target.id, { url: platform.newChatUrl, ...(command.focus ? { active: true } : {}) });
+  // 导航/刷新会销毁旧文档，旧 frame 上的注入会报 "Frame with ID 0 was removed"。
+  // 必须等新文档建立、旧上下文作废后再继续，否则第一次注入必然失败。
+  await waitForDocument(tab.id);
+  await trimPlatformTabs(platform, tab.id);
+  return tab;
+}
+// 等到标签页里的文档可以安全注入：加载完成且旧 documentId 已不可用。
+async function waitForDocument(tabId) {
+  const until = Date.now() + 45000;
+  let lastError = null;
+  while (Date.now() < until) {
+    let ready = false;
+    try {
+      const probe = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [0] }, injectImmediately: true,
+        func: () => document.readyState
+      });
+      ready = probe[0]?.result === 'complete' || probe[0]?.result === 'interactive';
+    } catch (e) { lastError = e; }
+    if (!ready) { await new Promise(r => setTimeout(r, 150)); continue; }
+    // 文档已可用，再等多一帧，确保 DOM 已挂上主体结构。
+    try {
+      const body = await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: () => Boolean(document.body && document.body.children.length) });
+      if (body[0]?.result) return;
+    } catch (e) { lastError = e; }
+    await new Promise(r => setTimeout(r, 150));
+  }
+  throw new GeoError('page_loading', `页面未能进入可注入状态${lastError ? `：${lastError.message}` : ''}`);
+}
 async function selectTab(command) {
   const platform = platformOf(command.platform);
   if (!platform) throw new GeoError('wrong_platform', `未知平台 ${command.platform}`);
-  if (command.action === 'run') return chrome.tabs.create({ url: platform.newChatUrl, active: command.focus });
+  if (command.action === 'run') return runTab(command, platform);
   if (command.tabId != null) {
     const tab = await chrome.tabs.get(command.tabId);
     if (!platformOfUrl(tab.url) || platformOfUrl(tab.url).id !== platform.id) throw new GeoError('wrong_platform', `指定标签页不是 ${platform.name}`);
@@ -113,6 +164,23 @@ async function selectTab(command) {
   const tabs = await chrome.tabs.query({ url: platform.tabPatterns });
   if (tabs.length !== 1) throw new GeoError(tabs.length ? 'ambiguous_tabs' : 'no_tab', tabs.length ? `有多个 ${platform.name} 标签页，请指定 tabId` : `请先打开 ${platform.name} 对话`, 400, { candidates: tabs.slice(0, 10).map(t => ({ tabId: t.id, title: t.title, url: t.url })) });
   return tabs[0];
+}
+// 导航过程中的注入必然撞上 "Frame with ID 0 was removed"：那是文档正在被替换，不是真的失败。
+// 只对这类瞬时错误重试，其它错误立刻抛出，避免把真正的配置问题掩盖成超时。
+const TRANSIENT_INJECT = /Frame with ID .* was removed|No frame with id|Cannot access contents|The tab was closed|frame.*(removed|not found)/i;
+async function injectWithRetry(tabId, files, attempts = 12) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, injectImmediately: true, files });
+    } catch (e) {
+      lastError = e;
+      if (!TRANSIENT_INJECT.test(e?.message || '')) throw e;
+      await waitForDocument(tabId).catch(() => {});
+      await new Promise(r => setTimeout(r, 200 * (i + 1)));
+    }
+  }
+  throw new GeoError('frame_unavailable', `页面上下文不稳定，无法注入脚本：${lastError?.message || '未知原因'}`);
 }
 async function launchTask(id) {
   let task = await getTask(id);
@@ -134,7 +202,7 @@ async function launchTask(id) {
   if (!isPlatformUrl((await chrome.tabs.get(tab.id)).url)) throw new GeoError('wrong_platform', '页面已离开目标平台');
   const platform = platformOf(task.command.platform);
   if (!platform) throw new GeoError('wrong_platform', `未知平台 ${task.command.platform}`);
-  const injected = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, injectImmediately: true, files: [platform.adapter, 'extension/runner.js'] });
+  const injected = await injectWithRetry(tab.id, [platform.adapter, 'extension/runner.js']);
   const documentId = injected[0]?.documentId;
   if (!documentId) throw new GeoError('missing_document', '无法确认页面执行上下文');
   await serial(async () => { task = await getTask(id); task.documentId = documentId; await putTask(task); });
@@ -285,6 +353,8 @@ async function ui(message) {
   if (message.type === 'ui-command') return api('/command', { method: 'POST', headers: { 'Idempotency-Key': message.idempotencyKey || crypto.randomUUID() }, body: JSON.stringify(message.command) });
   if (message.type === 'ui-result') { const t = await getTask(message.taskId); if (!t) throw new GeoError('not_found', '本地任务不存在'); const { screenshotBase64, ...result } = t.result || {}; return { taskId: t.id, status: t.status, result, diagnostic: t.diagnostic, error: t.error }; }
   if (message.type === 'ui-tabs') return { tabs: (await chrome.tabs.query({ url: tabPatterns() })).map(t => ({ id: t.id, title: t.title, url: t.url, platform: platformOfUrl(t.url)?.id || null })) };
+  // 扩展改了代码后必须重载才生效：磁盘上的文件、/status 的版本号都不是运行中的代码。
+  if (message.type === 'ui-reload') { setTimeout(() => chrome.runtime.reload(), 200); return { reloading: true }; }
   throw new GeoError('invalid_message', '未知界面消息');
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {

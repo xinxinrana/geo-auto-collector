@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GEO 采集助手",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "minimum_chrome_version": "120",
   "description": "在已登录的 AI 对话页面（Perplexity、豆包）采集回答与引用，通过本机 HTTP 和 CLI 交付给 Agent。",
   "permissions": ["scripting", "storage", "alarms", "sidePanel", "debugger"],

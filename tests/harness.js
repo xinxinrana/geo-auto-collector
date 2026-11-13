@@ -25,7 +25,8 @@ export async function browserFixture(t) {
   const timers = new Set(), sockets = new Set(), panels = [];
   const fixtures = { omitCompletion: false, ambiguous: false, delayCompletion: 80 };
   function makeTab(content, options = {}) {
-    const id = nextTab++, documentId = randomUUID();
+    const id = options.forcedId ?? nextTab++, documentId = randomUUID();
+    if (options.forcedId) nextTab = Math.max(nextTab, options.forcedId + 1);
     const url = options.url || 'https://www.perplexity.ai/';
     const dom = new JSDOM(content || '<main><form><textarea></textarea><button type="button" aria-label="Submit">Send</button></form><div class="focus:outline-none" id="rounds"></div></main>', { url, runScripts: 'outside-only', pretendToBeVisual: true });
     const w = dom.window, onMessage = listeners();
@@ -79,7 +80,17 @@ export async function browserFixture(t) {
           const patterns = queryInfo?.url || [];
           return [...tabs.values()].filter(tab => !patterns.length || patterns.some(p => new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$').test(tab.url))).map(tab => ({ id: tab.id, url: tab.url, title: tab.title }));
         },
-        update: async () => {},
+        update: async (id, props = {}) => { const tab = tabs.get(id); if (!tab) throw new Error('No tab'); if (props.url) tab.url = props.url; return { id, url: tab.url, status: tab.status, windowId: 1 }; },
+        reload: async id => {
+          const tab = tabs.get(id); if (!tab) throw new Error('No tab');
+          // 真实刷新期间旧文档先被销毁，此时任何注入都会报 "Frame with ID 0 was removed"。
+          // 夹具必须复现这个瞬时窗口，否则测不出注入重试是否真的有用。
+          tabs.delete(id);
+          await new Promise(r => setTimeout(r, fixtures.reloadGap ?? 120));
+          const fresh = makeTab('<main><div class="list_items" id="list"></div><textarea class="semi-input-textarea"></textarea><button id="send"><svg></svg></button></main>', { ...(fixtures.newTab || {}), forcedId: id, url: tab.url });
+          tabs.set(id, fresh); return undefined;
+        },
+        remove: async id => { tabs.delete(id); onRemoved.fire(id); },
         sendMessage: async (id, message, options) => {
           const tab = tabs.get(id); if (!tab || options?.documentId && options.documentId !== tab.documentId || !tab.onMessage.fns.length) throw new Error('Receiving end does not exist');
           return new Promise((resolve, reject) => { let response; tab.onMessage.fire(clone(message), { id: extensionId }, r => { response = r; }); if (response === undefined) reject(new Error('No response')); else resolve(clone(response)); });
@@ -87,7 +98,9 @@ export async function browserFixture(t) {
       },
       windows: { update: async () => {} },
       scripting: { executeScript: async ({ target, files, func }) => {
-        const tab = tabs.get(target.tabId); if (!tab) throw new Error('No tab');
+        const tab = tabs.get(target.tabId);
+        // 刷新/导航期间旧文档已被销毁：真实 Chrome 此刻会抛这个错，必须如实复现。
+        if (!tab) throw new Error('Frame with ID 0 was removed.');
         for (const file of files || []) tab.dom.window.eval(readFileSync(file, 'utf8'));
         return [{ documentId: tab.documentId, result: func ? tab.dom.window.eval(`(${func.toString()})()`) : null }];
       } },

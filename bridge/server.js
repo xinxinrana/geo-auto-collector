@@ -22,7 +22,7 @@ export function createBridge({ home, port = 8787, projectDir = resolve('.') }) {
       const u = new URL(req.url, 'http://127.0.0.1');
       if (req.method === 'GET' && u.pathname === '/help') return send(res, 200, help(version));
       if (req.method === 'GET' && (u.pathname === '/docs' || u.pathname.startsWith('/docs/'))) return send(res, 200, documentation(u.pathname.split('/')[2]));
-      if (req.method === 'GET' && u.pathname === '/status') return send(res, 200, { version, protocol: PROTOCOL, projectDir, extension: { connected: connected(), ready: connected() && peer.ready, lastSeen: peer?.lastSeen || null }, tasks: store.active().map(publicTask) });
+      if (req.method === 'GET' && u.pathname === '/status') return send(res, 200, { version, protocol: PROTOCOL, projectDir, extension: { connected: connected(), ready: connected() && peer.ready, lastSeen: peer?.lastSeen || null, version: peer?.version || null }, tasks: store.active().map(publicTask) });
       if (req.method === 'GET' && u.pathname === '/platforms') return send(res, 200, { platforms: Object.values(PLATFORMS).map(p => ({ ...p, online: connected() && peer.ready })) });
       if (req.method === 'POST' && u.pathname === '/command') {
         if (!req.headers['content-type']?.startsWith('application/json')) throw new GeoError('content_type', '需要 application/json', 415);
@@ -81,7 +81,7 @@ export function createBridge({ home, port = 8787, projectDir = resolve('.') }) {
           if (m.type !== 'hello' || m.protocol !== PROTOCOL) throw new GeoError('version_mismatch', '扩展与服务协议不匹配，请刷新扩展');
           if (peer && peer.ws !== ws) peer.ws.close(1000, 'reconnected');
           initialized = true; clearTimeout(timeout);
-          peer = { ws, ready: false, lastSeen: Date.now() };
+          peer = { ws, ready: false, lastSeen: Date.now(), version: m.version || null };
           ws.send(JSON.stringify({ type: 'welcome', projectDir, tasks: store.active().map(t => t.id) })); return;
         }
         if (peer?.ws !== ws) return ws.close(1008, 'superseded');
