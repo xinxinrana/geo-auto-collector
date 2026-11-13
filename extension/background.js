@@ -102,55 +102,26 @@ async function accept(task) {
   if (launch) void launchTask(task.id).catch(e => finishLocal(task.id, { status: e.code === 'stopped' ? 'interrupted' : 'failed', step: 'preparing', error: { code: e.code || 'execution_error', message: e.message, ...(e.details || {}) } })).finally(() => launching.delete(task.id));
 }
 // 每次 run 都新建标签页会让浏览器越积越多、拖慢整机。
-// 同一页面动作本来就是串行的，所以复用一个已有标签页即可；并保留上限。
+// 但"复用并刷新"会销毁文档，注入与消息投递都撞在文档切换的窗口上：
+// 实测刷新后首次注入报 "Frame with ID 0 was removed"，随后
+// "Could not establish connection. Receiving end does not exist."。
+// 因此宁可新开一个干净的标签页（这条路径已验证稳定），
+// 靠"跑完关掉最老的"来控制总量——效果一样，但不碰文档生命周期。
 const MAX_PLATFORM_TABS = 3;
-async function trimPlatformTabs(platform, keepId) {
+async function trimPlatformTabs(platform, keepId, limit = MAX_PLATFORM_TABS) {
   const tabs = await chrome.tabs.query({ url: platform.tabPatterns });
-  const excess = tabs.length - MAX_PLATFORM_TABS;
+  const excess = tabs.length - limit;
   if (excess <= 0) return;
+  // 从最老的开始关，保住最近的那几个（用户可能正在看）。
   const extra = tabs.filter(t => t.id !== keepId).sort((a, b) => (a.id || 0) - (b.id || 0));
   for (let i = 0; i < excess && i < extra.length; i++) {
     try { await chrome.tabs.remove(extra[i].id); } catch { /* 用户可能已手动关闭。 */ }
   }
 }
 async function runTab(command, platform) {
-  const tabs = await chrome.tabs.query({ url: platform.tabPatterns });
-  // 复用最老的标签页：导航/刷新到新对话页，等于"直接替换掉"上一次的页面。
-  // 只复用不刷新会沿用上一轮的对话 DOM，本轮问题根本不在页面上。
-  const target = tabs.length ? tabs.slice().sort((a, b) => (a.id || 0) - (b.id || 0))[0] : null;
-  if (!target) return chrome.tabs.create({ url: platform.newChatUrl, active: command.focus });
-  const reloading = target.url === platform.newChatUrl;
-  const tab = reloading
-    ? await chrome.tabs.reload(target.id).then(() => chrome.tabs.get(target.id))
-    : await chrome.tabs.update(target.id, { url: platform.newChatUrl, ...(command.focus ? { active: true } : {}) });
-  // 导航/刷新会销毁旧文档，旧 frame 上的注入会报 "Frame with ID 0 was removed"。
-  // 必须等新文档建立、旧上下文作废后再继续，否则第一次注入必然失败。
-  await waitForDocument(tab.id);
-  await trimPlatformTabs(platform, tab.id);
-  return tab;
-}
-// 等到标签页里的文档可以安全注入：加载完成且旧 documentId 已不可用。
-async function waitForDocument(tabId) {
-  const until = Date.now() + 45000;
-  let lastError = null;
-  while (Date.now() < until) {
-    let ready = false;
-    try {
-      const probe = await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] }, injectImmediately: true,
-        func: () => document.readyState
-      });
-      ready = probe[0]?.result === 'complete' || probe[0]?.result === 'interactive';
-    } catch (e) { lastError = e; }
-    if (!ready) { await new Promise(r => setTimeout(r, 150)); continue; }
-    // 文档已可用，再等多一帧，确保 DOM 已挂上主体结构。
-    try {
-      const body = await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: () => Boolean(document.body && document.body.children.length) });
-      if (body[0]?.result) return;
-    } catch (e) { lastError = e; }
-    await new Promise(r => setTimeout(r, 150));
-  }
-  throw new GeoError('page_loading', `页面未能进入可注入状态${lastError ? `：${lastError.message}` : ''}`);
+  // 先腾地方再开新页：保证任何时候都不会超过上限。
+  await trimPlatformTabs(platform, null, MAX_PLATFORM_TABS - 1);
+  return chrome.tabs.create({ url: platform.newChatUrl, active: command.focus });
 }
 async function selectTab(command) {
   const platform = platformOf(command.platform);
@@ -165,22 +136,22 @@ async function selectTab(command) {
   if (tabs.length !== 1) throw new GeoError(tabs.length ? 'ambiguous_tabs' : 'no_tab', tabs.length ? `有多个 ${platform.name} 标签页，请指定 tabId` : `请先打开 ${platform.name} 对话`, 400, { candidates: tabs.slice(0, 10).map(t => ({ tabId: t.id, title: t.title, url: t.url })) });
   return tabs[0];
 }
-// 导航过程中的注入必然撞上 "Frame with ID 0 was removed"：那是文档正在被替换，不是真的失败。
-// 只对这类瞬时错误重试，其它错误立刻抛出，避免把真正的配置问题掩盖成超时。
-const TRANSIENT_INJECT = /Frame with ID .* was removed|No frame with id|Cannot access contents|The tab was closed|frame.*(removed|not found)/i;
-async function injectWithRetry(tabId, files, attempts = 12) {
+// 新开标签页后，document 建立与 onMessage 注册之间仍可能有极短的空窗：
+// 实测偶发 "Could not establish connection. Receiving end does not exist."。
+// 这类错误是瞬时竞态而非真实故障，重试即可；其他错误立即抛出。
+const TRANSIENT_INJECT = /Frame with ID .* was removed|No frame with id|Cannot access contents|The tab was closed|frame.*(removed|not found)|Receiving end does not exist/i;
+async function sendWithRetry(tabId, message, documentId, attempts = 10) {
   let lastError = null;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, injectImmediately: true, files });
+      return await timeout(chrome.tabs.sendMessage(tabId, message, documentId ? { documentId } : {}));
     } catch (e) {
       lastError = e;
       if (!TRANSIENT_INJECT.test(e?.message || '')) throw e;
-      await waitForDocument(tabId).catch(() => {});
-      await new Promise(r => setTimeout(r, 200 * (i + 1)));
+      await new Promise(r => setTimeout(r, 250 * (i + 1)));
     }
   }
-  throw new GeoError('frame_unavailable', `页面上下文不稳定，无法注入脚本：${lastError?.message || '未知原因'}`);
+  throw new GeoError('runner_unreachable', `页面脚本未能接收任务：${lastError?.message || '未知原因'}`);
 }
 async function launchTask(id) {
   let task = await getTask(id);
@@ -202,13 +173,13 @@ async function launchTask(id) {
   if (!isPlatformUrl((await chrome.tabs.get(tab.id)).url)) throw new GeoError('wrong_platform', '页面已离开目标平台');
   const platform = platformOf(task.command.platform);
   if (!platform) throw new GeoError('wrong_platform', `未知平台 ${task.command.platform}`);
-  const injected = await injectWithRetry(tab.id, [platform.adapter, 'extension/runner.js']);
+  const injected = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, injectImmediately: true, files: [platform.adapter, 'extension/runner.js'] });
   const documentId = injected[0]?.documentId;
   if (!documentId) throw new GeoError('missing_document', '无法确认页面执行上下文');
   await serial(async () => { task = await getTask(id); task.documentId = documentId; await putTask(task); });
   if (terminal(task)) return;
   if (task.stopRequested) return finishLocal(id, { status: 'interrupted', step: 'ended', error: { code: 'stopped', message: '插件自动化已停止' } });
-  const response = await timeout(chrome.tabs.sendMessage(tab.id, { type: 'runner-start', task: { id: task.id, command: task.command }, runnerId: task.runnerId, config: task.config, seq: task.lastSeq }, { documentId }));
+  const response = await sendWithRetry(tab.id, { type: 'runner-start', task: { id: task.id, command: task.command }, runnerId: task.runnerId, config: task.config, seq: task.lastSeq }, documentId);
   if (!response?.accepted) throw new GeoError('runner_conflict', '页面已被其他任务占用');
 }
 async function stopTask(stop) {

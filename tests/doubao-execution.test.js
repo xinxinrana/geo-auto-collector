@@ -63,14 +63,13 @@ test('doubao: a tab from another platform is rejected', async t => {
   assert.equal(done.error.code, 'wrong_platform');
 });
 
-test('doubao: repeated runs reuse the page and never pile up tabs', async t => {
+test('doubao: repeated runs keep the tab count at three or fewer and all collect', async t => {
   const f = await browserFixture(t);
   f.fixtures.newTab = { url: 'https://www.doubao.com/chat/', content: doubaoPage, inputSelector: 'textarea', sendSelector: '#send', onSend: doubaoRender, title: 'Fixture 豆包' };
-  for (let i = 0; i < 5; i++) {
+  for (let i = 1; i <= 5; i++) {
     const task = await f.command({ action: 'run', platform: 'doubao', keyword: `弹性蛋白第${i}次`, timeoutMs: 15000 });
     const done = await f.done(task.id, 20000);
     assert.equal(done.status, 'done', JSON.stringify(done.error));
-    const live = [...f.tabs.values()].filter(tab => !tab.dom.window.closed);
-    assert.ok(live.length <= 3, `第 ${i + 1} 次后标签页数量为 ${live.length}`);
+    assert.ok([...f.tabs.keys()].length <= 3, `第 ${i} 次后标签页为 ${[...f.tabs.keys()].join(',')}`);
   }
 });
