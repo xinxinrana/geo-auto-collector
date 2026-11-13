@@ -1,7 +1,7 @@
 (() => {
   // 与适配器同理：只按存在性判重会让页面一直跑最早注入的旧 runner。
   // 但绝不能替换正在执行任务的 runner，否则它会丢失归属与进度。
-  const BUILD = 'runner-2026-11-13a';
+  const BUILD = 'runner-2026-11-13b';
   const existing = globalThis.GEORunner;
   if (existing && (existing.build === BUILD || (existing.state && !existing.state.finished))) return;
   const A = globalThis.GEOAdapter;
@@ -103,7 +103,9 @@
           state.partial = A.extract(round, command.keyword);
           // 开场白陷阱：豆包会先输出"我先查一下…"再检索，这段也可能短暂满足完成条件。
           // 因此只有正文长度足够（或平台明确给出完成信号）时才允许收尾。
-          const substantial = !A.minAnswerChars || value.length >= A.minAnswerChars;
+          // 长度不够判定"有实质内容"：过渡语可以长达几十字，必须由平台自己判定。
+          const mine = !A.substantive || A.substantive(round);
+          const substantial = mine && (!A.minAnswerChars || value.length >= A.minAnswerChars);
           const settled = value && !A.generating() && (seenGenerating || A.completed(round)) && Date.now() - lastChanged >= 2500;
           if (settled && substantial && Date.now() - lastChanged >= (A.minAnswerChars ? 6000 : 2500)) {
             check();

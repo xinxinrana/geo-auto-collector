@@ -2,7 +2,7 @@
   // 构建戳：用于判断页面里已注入的适配器是否为当前版本。
   // 之前只按 platformId 判重，导致改了文件却仍在跑页面里最早注入的那份旧代码。
   // 但正在执行任务的页面上不能换适配器，否则行为会中途改变。
-  const BUILD = 'doubao-2026-11-13a';
+  const BUILD = 'doubao-2026-11-13b';
   const running = globalThis.GEORunner?.state && !globalThis.GEORunner.state.finished;
   if (globalThis.GEOAdapter?.platformId === 'doubao' && (globalThis.GEOAdapter.build === BUILD || running)) return;
   const PLATFORM_ID = 'doubao';
@@ -124,6 +124,19 @@
     const parts = (round.answers || [round.answer]).map(n => text(n)).filter(Boolean);
     return parts.join('\n\n');
   }
+  // 开场白辨识：豆包会先说"我先查一下…""我再查一下…"，这段有几十字，
+  // 单靠 minAnswerChars 拦不住（实测出现过 74 字全是过渡语、却已挂出操作栏）。
+  // 判据顺序很重要：先认出过渡语，再要求至少一段不是过渡语。
+  // 反过来"含品牌/产品就算实质"会误放——过渡段本身就常写"品牌信息""主流产品"。
+  const PREAMBLE = /(我先|我再|让我|接下来|稍等)[^。！？\n]{0,12}(查|搜索|检索|找|确认|核对|了解)一下/;
+  function substantive(round) {
+    const value = bodyText(round);
+    if (!value) return false;
+    if (!PREAMBLE.test(value)) return true;
+    // 逐段看：只要有一段不含检索预告，就说明正文已经写出来了。
+    const parts = (round.answers || [round.answer]).map(n => text(n)).filter(Boolean);
+    return parts.some(p => p.trim() && !PREAMBLE.test(p));
+  }
   function bodyHtml(round) {
     const parts = (round.answers || [round.answer]).map(n => n.innerHTML).filter(Boolean);
     return parts.join('');
@@ -191,7 +204,8 @@
     return bar.some(b => b.querySelector('[data-testid="message_action_copy"],[data-testid="message_action_like"],[data-testid="message_action_share"]'));
   }
   // 完成：正文稳定、不再生成，并且操作栏已出现；豆包不总有"复制"按钮，因此以操作栏为正向证据。
-  function completed(round) { return Boolean(bodyText(round)) && !generating() && hasActionBar(round); }
+  // 额外要求正文有实质内容：只有"我先查一下…"的过渡段也满足稳定性，绝不能当完成。
+  function completed(round) { return Boolean(bodyText(round)) && !generating() && hasActionBar(round) && substantive(round); }
   function extract(round, keyword) {
     const citations = [], seen = new Set();
     for (const a of (round.answers || [round.answer]).flatMap(n => [...n.querySelectorAll('a[href]')])) {
@@ -356,5 +370,5 @@
   function loginRequired(href = location.href) {
     try { const u = new URL(href); return /(^|\.)passport\.doubao\.com$/.test(u.hostname) || /^\/login(\/|$)/.test(u.pathname); } catch { return false; }
   }
-  globalThis.GEOAdapter = { platformId: PLATFORM_ID, build: BUILD, normalize, text, visible, failure, input, send, submit, verifySubmitted, rounds, current, resolve, inspect, pruned, generating, completed, hasActionBar, extract, fill, bounds, isPlatformUrl, loginRequired, questionText, bodyText, answerText: bodyText, minAnswerChars: 60 };
+  globalThis.GEOAdapter = { platformId: PLATFORM_ID, build: BUILD, normalize, text, visible, failure, input, send, submit, verifySubmitted, rounds, current, resolve, inspect, pruned, generating, completed, hasActionBar, extract, fill, bounds, isPlatformUrl, loginRequired, questionText, bodyText, answerText: bodyText, substantive, minAnswerChars: 60 };
 })();

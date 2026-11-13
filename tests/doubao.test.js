@@ -149,3 +149,26 @@ test('doubao treats an answer with the action bar as complete', () => {
   assert.equal(A2.hasActionBar(round), true);
   assert.equal(A2.completed(round), true);
 });
+
+test('doubao: a long preamble with no substance is not a finished answer', () => {
+  // 实测出现过 74 字全是"我先搜索…我再查一下…"，且已挂出操作栏。
+  // 只靠长度门槛会把它当成答案，这里必须由 substantive 拦下。
+  const round = {
+    question: null,
+    container: { querySelectorAll: () => [], querySelector: () => null },
+    answers: [{ textContent: '关于弹性蛋白（Elastin）的品牌建议，我先搜索一下当前市面上的主流产品信息。搜索结果中混杂了不少软文广告，我再查一下更可靠的原料与品牌信息。', querySelectorAll: () => [], innerHTML: '' }]
+  };
+  assert.equal(A.substantive(round), false);
+});
+
+test('doubao: a real answer containing a search phrase is still substantial', () => {
+  const round = {
+    question: null,
+    container: { querySelectorAll: () => [], querySelector: () => null },
+    answers: [
+      { textContent: '我先查一下。', querySelectorAll: () => [], innerHTML: '' },
+      { textContent: '结论：弹性蛋白推荐品牌 A 和品牌 B，每日 75mg，适合长期补充。', querySelectorAll: () => [], innerHTML: '' }
+    ]
+  };
+  assert.equal(A.substantive(round), true);
+});
